@@ -1,3 +1,16 @@
+## [0.12.60] — 2026-03-19
+
+### Added
+- **Channels tab**: per-channel observability with webhook error rates, message duration p50/p99, queue depth, and cost attribution grouped by channel
+- OTLP status indicator in `clawmetry status` CLI command with restart hint
+- New `/api/channel-metrics` endpoint for per-channel OTLP metrics
+
+## [0.12.59] — 2026-03-19
+
+### Fixed
+- Add `/api/memory` and `/api/flow` route aliases for E2E health checks
+- Recent-first sync strategy for Brain feed
+
 ## [0.12.57] — 2026-03-17
 
 ### Added
