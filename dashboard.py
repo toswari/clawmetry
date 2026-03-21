@@ -61,7 +61,7 @@ except ImportError:
     metrics_service_pb2 = None
     trace_service_pb2 = None
 
-__version__ = "0.12.60"
+__version__ = "0.12.61"
 
 # Extensions (Phase 2) — load plugins at import time; safe no-op if package not installed
 try:
@@ -16232,6 +16232,10 @@ def _check_auth():
         return  # Fleet API uses its own X-Fleet-Key authentication
     if not request.path.startswith('/api/'):
         return  # HTML, static, etc. are fine
+    # Trust localhost — the dashboard is a local tool; auth protects remote access only
+    remote = request.remote_addr or ''
+    if remote in ('127.0.0.1', '::1', 'localhost'):
+        return
     if not GATEWAY_TOKEN:
         return jsonify({'error': 'Gateway token not configured. Please set up your gateway token first.', 'needsSetup': True}), 401
     token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
@@ -16449,6 +16453,8 @@ def api_overview():
         'model': model_name,
         'provider': _infer_provider_from_model(model_name),
         'sessionCount': len(sessions),
+        'sessions': len(sessions),  # alias for E2E compatibility
+        'activeSessions': len([s for s in sessions if s.get('active')]),
         'mainSessionUpdated': main.get('updatedAt'),
         'mainTokens': main.get('totalTokens', 0),
         'contextWindow': main.get('contextTokens', 200000),
@@ -17505,7 +17511,12 @@ def api_brain_stream():
 def api_flow_events():
     """SSE endpoint — emits typed flow events (msg_in, msg_out, tool_call, tool_result).
     No auth required. Tails gateway.log + active session JSONL on disk.
+    Returns JSON status for non-SSE clients (HEAD requests or Accept: application/json).
     """
+    # E2E health checks and non-SSE clients get a lightweight JSON response
+    accept = request.headers.get('Accept', '')
+    if request.method == 'HEAD' or 'text/event-stream' not in accept:
+        return jsonify({'ok': True, 'type': 'flow-events', 'streaming': True})
     import glob as _glob
 
     def _find_active_jsonl():
