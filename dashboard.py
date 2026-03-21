@@ -440,6 +440,8 @@ def _get_budget_config():
         'monthly_limit': 0,
         'auto_pause_enabled': False,
         'auto_pause_threshold_pct': 100,
+        'auto_pause_threshold_usd': 0,
+        'auto_pause_action': 'pause',
         'warning_threshold_pct': 80,
         'telegram_bot_token': '',
         'telegram_chat_id': '',
@@ -590,6 +592,8 @@ def _get_budget_status():
         'paused_at': _budget_paused_at,
         'paused_reason': _budget_paused_reason,
         'auto_pause_enabled': config['auto_pause_enabled'],
+        'auto_pause_threshold_usd': config['auto_pause_threshold_usd'],
+        'auto_pause_action': config['auto_pause_action'],
         'warning_threshold_pct': config['warning_threshold_pct'],
     }
 
@@ -4234,6 +4238,41 @@ async function loadMiniWidgets(overview, usage) {
   }
 
   applyBillingHintToFlow(usage.billingSummary || 'unknown');
+
+  // Budget enforcement widget: hard-cap banner + burn rate + projected monthly cost.
+  try {
+    var status = await fetch('/api/budget/status').then(function(r){ return r.json(); });
+    var now = new Date();
+    var elapsedHours = now.getHours() + (now.getMinutes() / 60.0) + (now.getSeconds() / 3600.0);
+    elapsedHours = elapsedHours > 0 ? elapsedHours : 1 / 60.0;
+    var burnTokensHr = (usage.today || 0) / elapsedHours;
+    var burnCostHr = (usage.todayCost || 0) / elapsedHours;
+    var daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    var projectedMonthlyCost = burnCostHr * 24 * daysInMonth;
+
+    var burnEl = document.getElementById('budget-burn-rate');
+    var projEl = document.getElementById('budget-projected-month');
+    if (burnEl) burnEl.textContent = Math.round(burnTokensHr).toLocaleString() + ' tok/h';
+    if (projEl) projEl.textContent = fmtCost(projectedMonthlyCost);
+
+    var banner = document.getElementById('budget-cap-banner');
+    var bannerMsg = document.getElementById('budget-cap-banner-msg');
+    var dailyLimit = Number(status.daily_limit || 0);
+    var dailySpent = Number(status.daily_spent || 0);
+    if (banner && bannerMsg) {
+      if (dailyLimit > 0 && dailySpent > dailyLimit) {
+        bannerMsg.textContent = 'Daily hard cap exceeded: ' + fmtCost(dailySpent) + ' / ' + fmtCost(dailyLimit);
+        banner.style.display = 'flex';
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+  } catch (e) {
+    var burnFallback = document.getElementById('budget-burn-rate');
+    var projFallback = document.getElementById('budget-projected-month');
+    if (burnFallback) burnFallback.textContent = '--';
+    if (projFallback) projFallback.textContent = '--';
+  }
   
   // ⚡ Tool Activity (load from logs)
   loadToolActivity();
@@ -5568,6 +5607,72 @@ def _set_budget_config(updates):
             )
         db.commit()
         db.close()
+
+
+def _default_alerts_webhook_config():
+    return {
+        'webhook_url': '',
+        'slack_webhook_url': '',
+        'discord_webhook_url': '',
+        'cost_spike_alerts': True,
+        'agent_error_rate_alerts': True,
+        'security_posture_changes': True,
+    }
+
+
+def _load_alerts_webhook_config():
+    cfg = _default_alerts_webhook_config()
+    try:
+        if os.path.exists(_ALERTS_CONFIG_FILE):
+            with open(_ALERTS_CONFIG_FILE, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k in cfg:
+                    if k in data:
+                        cfg[k] = data[k]
+    except Exception:
+        pass
+    return cfg
+
+
+def _save_alerts_webhook_config(updates):
+    cfg = _load_alerts_webhook_config()
+    for k in cfg:
+        if k in updates:
+            cfg[k] = updates[k]
+    try:
+        os.makedirs(os.path.dirname(_ALERTS_CONFIG_FILE), exist_ok=True)
+        with open(_ALERTS_CONFIG_FILE, 'w') as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
+    return cfg
+
+
+def _should_send_webhook_for_type(alert_type):
+    cfg = _load_alerts_webhook_config()
+    if alert_type in ('cost_spike', 'daily_threshold_breached', 'weekly_threshold_breached'):
+        return bool(cfg.get('cost_spike_alerts', True))
+    if alert_type == 'agent_error_rate':
+        return bool(cfg.get('agent_error_rate_alerts', True))
+    if alert_type == 'security_posture_change':
+        return bool(cfg.get('security_posture_changes', True))
+    return True
+
+
+def _dispatch_configured_webhooks(alert_type, payload):
+    if not _should_send_webhook_for_type(alert_type):
+        return
+    cfg = _load_alerts_webhook_config()
+    generic_url = str(cfg.get('webhook_url', '')).strip()
+    slack_url = str(cfg.get('slack_webhook_url', '')).strip()
+    discord_url = str(cfg.get('discord_webhook_url', '')).strip()
+    if generic_url:
+        _send_webhook_alert(generic_url, payload, payload_type='generic')
+    if slack_url:
+        _send_webhook_alert(slack_url, payload, payload_type='slack')
+    if discord_url:
+        _send_webhook_alert(discord_url, payload, payload_type='discord')
 
 
 def _get_budget_status():
