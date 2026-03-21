@@ -2835,6 +2835,24 @@ function clawmetryLogout(){
           </div>
         </div>
       </div>
+      <div style="padding:12px;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:8px;margin-bottom:12px;">
+        <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px;">Configure Alerts</div>
+        <div style="display:grid;gap:8px;">
+          <input id="alert-webhook-url" type="text" placeholder="Generic webhook URL (JSON payload)" style="padding:8px;border:1px solid var(--border-primary);border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);">
+          <input id="alert-slack-url" type="text" placeholder="Slack incoming webhook URL" style="padding:8px;border:1px solid var(--border-primary);border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);">
+          <input id="alert-discord-url" type="text" placeholder="Discord webhook URL" style="padding:8px;border:1px solid var(--border-primary);border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="alert-toggle-cost-spike"> Cost spike alerts</label>
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="alert-toggle-agent-error"> Agent error rate alerts</label>
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="alert-toggle-security"> Security posture changes</label>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button onclick="saveWebhookConfig()" style="background:var(--bg-accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;">Save</button>
+            <button onclick="testWebhookConfig('all')" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;">Test</button>
+            <span id="alert-webhook-status" style="font-size:12px;color:var(--text-muted);display:flex;align-items:center;"></span>
+          </div>
+        </div>
+      </div>
       <div id="alert-rules-list" style="font-size:13px;color:var(--text-secondary);">Loading...</div>
     </div>
     <!-- Telegram Tab -->
@@ -5963,7 +5981,7 @@ def _get_active_alerts():
 
 def _budget_monitor_loop():
     """Background thread: check for anomalies, agent-down, and custom alert rules."""
-    global _budget_alert_cooldowns
+    global _budget_alert_cooldowns, _security_posture_hash, _budget_paused, _budget_paused_at, _budget_paused_reason
     while True:
         time.sleep(60)
         try:
@@ -5999,12 +6017,110 @@ def _budget_monitor_loop():
             if daily_spent > 0:
                 week_avg = status['weekly_spent'] / 7 if status['weekly_spent'] > 0 else 0
                 if week_avg > 0 and daily_spent > week_avg * 2:
+                    ratio = (daily_spent / week_avg)
                     _fire_alert(
                         rule_id='anomaly_daily',
                         alert_type='anomaly',
-                        message=f'Spending anomaly: today ${daily_spent:.2f} is {(daily_spent/week_avg):.1f}x the 7-day average (${week_avg:.2f}/day)',
+                        message=f'Spending anomaly: today ${daily_spent:.2f} is {ratio:.1f}x the 7-day average (${week_avg:.2f}/day)',
                         channels=['banner', 'telegram'],
                     )
+                    _dispatch_configured_webhooks('cost_spike', {
+                        'type': 'cost_spike',
+                        'agent': 'main',
+                        'cost_usd': round(daily_spent, 4),
+                        'threshold': round(week_avg * 2, 4),
+                        'timestamp': now,
+                        'message': f'Cost spike detected: {ratio:.1f}x daily average',
+                    })
+
+            # Agent error-rate check from webhook channel metrics (last 60 minutes)
+            window_start = now - 3600
+            total_wh = 0
+            error_wh = 0
+            with _metrics_lock:
+                for e in metrics_store.get('webhooks', []):
+                    ts = e.get('timestamp', 0)
+                    if ts < window_start:
+                        continue
+                    total_wh += 1
+                    et = str(e.get('type', '')).lower()
+                    if et.endswith('.error') or 'error' in et:
+                        error_wh += 1
+            if total_wh >= 10:
+                error_rate = (error_wh / total_wh) * 100.0
+                if error_rate >= 20.0:
+                    rule_id = 'agent_error_rate_high'
+                    last_fired = _budget_alert_cooldowns.get(rule_id, 0)
+                    if now - last_fired >= 1800:
+                        _budget_alert_cooldowns[rule_id] = now
+                        msg = f'Agent error rate high: {error_rate:.1f}% ({error_wh}/{total_wh}) in the last hour'
+                        _fire_alert(rule_id=rule_id, alert_type='agent_error_rate', message=msg, channels=['banner', 'telegram'])
+                        _dispatch_configured_webhooks('agent_error_rate', {
+                            'type': 'agent_error_rate',
+                            'agent': 'main',
+                            'cost_usd': round(status.get('daily_spent', 0), 4),
+                            'threshold': 20.0,
+                            'timestamp': now,
+                            'message': msg,
+                        })
+
+            # Security posture change check
+            posture = _detect_security_metadata() or {}
+            posture_hash = json.dumps(posture, sort_keys=True)
+            if not _security_posture_hash:
+                _security_posture_hash = posture_hash
+            elif posture_hash != _security_posture_hash:
+                _security_posture_hash = posture_hash
+                msg = 'Security posture changed (sandbox/auth/network settings updated)'
+                _fire_alert(rule_id='security_posture_change', alert_type='security', message=msg, channels=['banner', 'telegram'])
+                _dispatch_configured_webhooks('security_posture_change', {
+                    'type': 'security_posture_change',
+                    'agent': 'main',
+                    'cost_usd': round(status.get('daily_spent', 0), 4),
+                    'threshold': 0,
+                    'timestamp': now,
+                    'message': msg,
+                })
+
+            # Daily threshold auto-pause/alert (absolute USD)
+            cfg = _get_budget_config()
+            auto_thr = float(cfg.get('auto_pause_threshold_usd', 0) or 0)
+            auto_action = str(cfg.get('auto_pause_action', 'pause') or 'pause').lower()
+            if auto_thr > 0 and status.get('daily_spent', 0) >= auto_thr:
+                if auto_action == 'pause' and not _budget_paused:
+                    _budget_paused = True
+                    _budget_paused_at = now
+                    _budget_paused_reason = f'Auto-pause threshold exceeded: ${status["daily_spent"]:.2f} / ${auto_thr:.2f}'
+                    _fire_alert(
+                        rule_id='auto_pause_daily_usd',
+                        alert_type='threshold',
+                        message=f'AUTO-PAUSE: daily spend ${status["daily_spent"]:.2f} exceeded ${auto_thr:.2f}',
+                        channels=['banner', 'telegram'],
+                    )
+                    _dispatch_configured_webhooks('daily_threshold_breached', {
+                        'type': 'daily_threshold_breached',
+                        'agent': 'main',
+                        'cost_usd': round(status.get('daily_spent', 0), 4),
+                        'threshold': round(auto_thr, 4),
+                        'timestamp': now,
+                        'message': _budget_paused_reason,
+                    })
+                    _pause_gateway()
+                elif auto_action == 'alert':
+                    rule_id = 'auto_pause_daily_alert_only'
+                    last_fired = _budget_alert_cooldowns.get(rule_id, 0)
+                    if now - last_fired >= 1800:
+                        _budget_alert_cooldowns[rule_id] = now
+                        msg = f'Daily spend alert threshold exceeded: ${status["daily_spent"]:.2f} / ${auto_thr:.2f}'
+                        _fire_alert(rule_id=rule_id, alert_type='threshold', message=msg, channels=['banner', 'telegram'])
+                        _dispatch_configured_webhooks('daily_threshold_breached', {
+                            'type': 'daily_threshold_breached',
+                            'agent': 'main',
+                            'cost_usd': round(status.get('daily_spent', 0), 4),
+                            'threshold': round(auto_thr, 4),
+                            'timestamp': now,
+                            'message': msg,
+                        })
 
             # Custom alert rules
             rules = _get_alert_rules()
@@ -7889,6 +8005,13 @@ function clawmetryLogout(){
   <button id="alert-resume-btn" onclick="resumeGateway()" style="display:none;background:#16a34a;color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;font-weight:600;">Resume Gateway</button>
 </div>
 
+<!-- Auto-Pause Banner -->
+<div id="paused-banner" style="display:none;padding:10px 16px;background:#7f1d1d;border-bottom:2px solid #ef4444;color:#fecaca;font-size:13px;font-weight:700;align-items:center;gap:10px;">
+  <span style="font-size:18px;">⏸</span>
+  <span id="paused-banner-msg" style="flex:1;"></span>
+  <button onclick="dismissPausedBanner()" style="background:#991b1b;color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;font-weight:600;">Dismiss</button>
+</div>
+
 <!-- Heartbeat Gap Banner -->
 <div id="heartbeat-banner" style="display:none;padding:10px 16px;border-bottom:2px solid #f59e0b;font-size:13px;font-weight:600;align-items:center;gap:10px;background:#451a03;color:#fbbf24;">
   <span style="font-size:18px;">&#x1F494;</span>
@@ -8818,7 +8941,7 @@ function switchBudgetTab(tab, el) {
     var d = document.getElementById('budget-tab-'+t);
     if(d) d.style.display = t===tab ? 'block' : 'none';
   });
-  if(tab==='alerts') loadAlertRules();
+  if(tab==='alerts') { loadAlertRules(); loadWebhookConfig(); }
   if(tab==='telegram') loadTelegramConfig();
   if(tab==='history') loadAlertHistory();
 }
@@ -8927,6 +9050,70 @@ async function deleteAlertRule(id) {
   loadAlertRules();
 }
 
+async function loadWebhookConfig() {
+  try {
+    var cfg = await fetch('/api/alerts/webhook').then(function(r){return r.json();});
+    document.getElementById('alert-webhook-url').value = cfg.webhook_url || '';
+    document.getElementById('alert-slack-url').value = cfg.slack_webhook_url || '';
+    document.getElementById('alert-discord-url').value = cfg.discord_webhook_url || '';
+    document.getElementById('alert-toggle-cost-spike').checked = cfg.cost_spike_alerts !== false;
+    document.getElementById('alert-toggle-agent-error').checked = cfg.agent_error_rate_alerts !== false;
+    document.getElementById('alert-toggle-security').checked = cfg.security_posture_changes !== false;
+    document.getElementById('alert-webhook-status').textContent = '';
+  } catch(e) {}
+}
+
+async function saveWebhookConfig() {
+  var status = document.getElementById('alert-webhook-status');
+  status.style.color = 'var(--text-muted)';
+  status.textContent = 'Saving...';
+  var payload = {
+    webhook_url: document.getElementById('alert-webhook-url').value.trim(),
+    slack_webhook_url: document.getElementById('alert-slack-url').value.trim(),
+    discord_webhook_url: document.getElementById('alert-discord-url').value.trim(),
+    cost_spike_alerts: document.getElementById('alert-toggle-cost-spike').checked,
+    agent_error_rate_alerts: document.getElementById('alert-toggle-agent-error').checked,
+    security_posture_changes: document.getElementById('alert-toggle-security').checked,
+  };
+  try {
+    var r = await fetch('/api/alerts/webhook', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    if (!r.ok) throw new Error('Save failed');
+    status.style.color = 'var(--text-success)';
+    status.textContent = 'Saved';
+  } catch(e) {
+    status.style.color = 'var(--text-error)';
+    status.textContent = 'Save failed';
+  }
+}
+
+async function testWebhookConfig(target) {
+  var status = document.getElementById('alert-webhook-status');
+  status.style.color = 'var(--text-muted)';
+  status.textContent = 'Sending test...';
+  try {
+    var r = await fetch('/api/alerts/webhook/test', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({target: target || 'all'})
+    });
+    var data = await r.json();
+    if(data.ok) {
+      status.style.color = 'var(--text-success)';
+      status.textContent = 'Test sent to: ' + (data.sent || []).join(', ');
+    } else {
+      status.style.color = 'var(--text-error)';
+      status.textContent = data.error || 'Test failed';
+    }
+  } catch(e) {
+    status.style.color = 'var(--text-error)';
+    status.textContent = 'Test failed';
+  }
+}
+
 async function loadAlertHistory() {
   try {
     var data = await fetch('/api/alerts/history?limit=50').then(function(r){return r.json();});
@@ -9010,6 +9197,35 @@ async function checkHeartbeatStatus() {
 }
 setInterval(checkHeartbeatStatus, 30000);
 setTimeout(checkHeartbeatStatus, 5000);
+
+function dismissPausedBanner() {
+  localStorage.setItem('cm_paused_banner_dismissed', String(Date.now()));
+  var banner = document.getElementById('paused-banner');
+  if (banner) banner.style.display = 'none';
+}
+
+async function refreshPausedBanner() {
+  try {
+    var status = await fetch('/api/budget/status').then(function(r){return r.json();});
+    var banner = document.getElementById('paused-banner');
+    if (!banner) return;
+    if (!status.paused) {
+      banner.style.display = 'none';
+      return;
+    }
+    var dismissedAt = parseInt(localStorage.getItem('cm_paused_banner_dismissed') || '0', 10) || 0;
+    var pausedAtMs = Math.floor((status.paused_at || 0) * 1000);
+    if (dismissedAt >= pausedAtMs && pausedAtMs > 0) {
+      banner.style.display = 'none';
+      return;
+    }
+    var reason = status.paused_reason || 'Auto-pause active';
+    document.getElementById('paused-banner-msg').textContent = 'PAUSED: ' + reason;
+    banner.style.display = 'flex';
+  } catch(e) {}
+}
+setInterval(refreshPausedBanner, 15000);
+setTimeout(refreshPausedBanner, 1500);
 
 // === Telegram Config Functions ===
 async function loadTelegramConfig() {
@@ -15884,6 +16100,8 @@ def api_gw_invoke():
     args = data.get('args', {})
     if not tool:
         return jsonify({'error': 'tool is required'}), 400
+    if _budget_paused and tool in ('sessions_spawn', 'session_start', 'session.create'):
+        return jsonify({'error': 'Auto-pause active: refusing new session starts', 'paused': True}), 429
     result = _gw_invoke(tool, args)
     if result is None:
         return jsonify({'error': 'Gateway not configured or unreachable'}), 503
@@ -16481,6 +16699,8 @@ def api_cron_run():
     job_id = data.get('jobId', '')
     if not job_id:
         return jsonify({'error': 'Missing jobId'}), 400
+    if _budget_paused:
+        return jsonify({'error': 'Auto-pause active: refusing new session starts', 'paused': True}), 429
     result = _gw_invoke('cron', {'action': 'run', 'jobId': job_id})
     if result is None:
         return jsonify({'error': 'Gateway unavailable'}), 502
@@ -16537,6 +16757,8 @@ def api_cron_create():
         return jsonify({'error': 'Missing name'}), 400
     if not schedule:
         return jsonify({'error': 'Missing schedule'}), 400
+    if _budget_paused:
+        return jsonify({'error': 'Auto-pause active: refusing new session starts', 'paused': True}), 429
     args = {
         'action': 'add',
         'name': name,
@@ -17947,6 +18169,7 @@ def api_budget_config():
         data = request.get_json(silent=True) or {}
         allowed = ['daily_limit', 'weekly_limit', 'monthly_limit',
                     'auto_pause_enabled', 'auto_pause_threshold_pct',
+                    'auto_pause_threshold_usd', 'auto_pause_action',
                     'warning_threshold_pct',
                     'telegram_bot_token', 'telegram_chat_id']
         updates = {k: v for k, v in data.items() if k in allowed}
@@ -17961,6 +18184,24 @@ def api_budget_config():
 def api_budget_status():
     """Get current budget status with spending totals."""
     return jsonify(_get_budget_status())
+
+
+@bp_budget.route('/api/budget/auto-pause', methods=['POST'])
+def api_budget_auto_pause():
+    """Set absolute daily auto-pause/alert threshold."""
+    data = request.get_json(silent=True) or {}
+    threshold = data.get('threshold_usd')
+    action = str(data.get('action', 'pause')).strip().lower()
+    if action not in ('pause', 'alert'):
+        return jsonify({'ok': False, 'error': "action must be 'pause' or 'alert'"}), 400
+    try:
+        threshold_val = float(threshold)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'threshold_usd must be a number'}), 400
+    if threshold_val < 0:
+        return jsonify({'ok': False, 'error': 'threshold_usd must be >= 0'}), 400
+    _set_budget_config({'auto_pause_threshold_usd': threshold_val, 'auto_pause_action': action})
+    return jsonify({'ok': True, 'threshold_usd': threshold_val, 'action': action})
 
 
 @bp_budget.route('/api/budget/pause', methods=['POST'])
