@@ -1932,30 +1932,19 @@ def run_daemon() -> None:
             log.info(f"  Crons: {cr} synced")
     except Exception as e:
         log.warning(f"  Cron sync error: {e}")
+    # Sync today's log lines immediately so Brain tab shows the most recent
+    # activity right away — older log history is backfilled later
+    try:
+        lg = sync_logs(config, state, paths)
+        if lg:
+            log.info(f"  Recent logs: {lg} lines synced")
+    except Exception as e:
+        log.warning(f"  Recent log sync error: {e}")
+
     state["last_sync"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
     send_heartbeat(config)
     log.info("Recent sync complete — Brain feed should show current activity")
-
-    # On first run, also do a full backfill so historical data is available.
-    first_run = not state.get("initial_backfill_done")
-    if first_run:
-        log.info("First run — backfilling older sessions in background...")
-        try:
-            ev = sync_sessions(config, state, paths)
-            save_state(state)
-            log.info(f"  Backfill: {ev} older events synced")
-        except Exception as e:
-            log.warning(f"  Backfill error: {e}")
-        try:
-            lg = sync_logs(config, state, paths)
-            log.info(f"  Logs: {lg} lines synced")
-        except Exception as e:
-            log.warning(f"  Log sync error: {e}")
-        state["initial_backfill_done"] = True
-        state["last_sync"] = datetime.now(timezone.utc).isoformat()
-        save_state(state)
-        log.info("Initial backfill complete")
 
     # Validate stored log offsets on startup — prevents silent gaps
     # after log rotation, file truncation, or daemon restarts
@@ -1965,29 +1954,72 @@ def run_daemon() -> None:
     # Start real-time log streamer in background
     start_log_streamer(config, paths)
 
+    # Backfill older sessions in a background thread so the main loop
+    # (and Brain tab) shows current activity immediately. The backfill
+    # thread waits for the first main-loop cycle to complete before
+    # sending historical data — recent events always reach the cloud first.
+    first_run = not state.get("initial_backfill_done")
+    _backfill_done = threading.Event()
+    if first_run:
+        def _backfill_worker():
+            # Give the main loop one full cycle (≈15s) to post recent events
+            time.sleep(20)
+            log.info("Background backfill starting — syncing older sessions...")
+            try:
+                bf_state = load_state()
+                ev = sync_sessions(config, bf_state, paths)
+                bf_state["initial_backfill_done"] = True
+                bf_state["last_sync"] = datetime.now(timezone.utc).isoformat()
+                save_state(bf_state)
+                log.info(f"Background backfill: {ev} older events synced")
+            except Exception as e:
+                log.warning(f"Background backfill error: {e}")
+            try:
+                bf_state = load_state()
+                lg = sync_logs(config, bf_state, paths)
+                save_state(bf_state)
+                log.info(f"Background backfill: {lg} log lines synced")
+            except Exception as e:
+                log.warning(f"Background backfill log error: {e}")
+            _backfill_done.set()
+            log.info("Background backfill complete")
+
+        t = threading.Thread(target=_backfill_worker, daemon=True, name="backfill")
+        t.start()
+
     heartbeat_interval = 60
-    snapshot_interval = 60  # system snapshot every 60s, not every 15s
-    last_heartbeat = time.time()
-    last_snapshot = 0  # force first snapshot immediately
+    snapshot_interval = 60   # system snapshot (subagents, flow metrics) every 60s
+    log_sync_interval  = 60  # log lines are low-priority; streamer covers real-time
+    last_heartbeat  = time.time()
+    last_snapshot   = 0  # force first snapshot immediately
+    last_log_sync   = time.time()  # already synced at startup; next run after log_sync_interval
     consecutive_hb_failures = 0
 
     while True:
         try:
             state = load_state()
-            ev = sync_sessions(config, state, paths)
-            lg = sync_logs(config, state, paths)
-            mem = sync_memory(config, state, paths)
-            crons = sync_crons(config, state, paths)
-            sm = sync_session_metadata(config, state)
-            # System snapshot only every 60s (system info changes slowly)
+
+            # ── High-priority: memory, flow metrics, subagents, recent sessions ──
+            mem  = sync_memory(config, state, paths)
             snap = 0
             now_snap = time.time()
             if now_snap - last_snapshot > snapshot_interval:
-                snap = sync_system_snapshot(config, state, paths)
+                snap = sync_system_snapshot(config, state, paths)  # subagents + flow
                 last_snapshot = now_snap
+            ev = sync_sessions(config, state, paths)
+            sm = sync_session_metadata(config, state)
+            crons = sync_crons(config, state, paths)
+
+            # ── Low-priority: log lines (real-time covered by streamer) ──
+            lg = 0
+            now_log = time.time()
+            if now_log - last_log_sync > log_sync_interval:
+                lg = sync_logs(config, state, paths)
+                last_log_sync = now_log
+
             state["last_sync"] = datetime.now(timezone.utc).isoformat()
             save_state(state)
-            if ev or lg or mem or crons or sm:
+            if ev or lg or mem or crons or sm or snap:
                 log.info(f"Synced {ev} events, {lg} log lines, {mem} memory files, {crons} crons, {sm} session rows ({enc})")
 
             # Re-mirror Docker data if running in Docker mode
