@@ -52,9 +52,8 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# Upgrade pip (using python -m pip to avoid in-use upgrade error on Windows)
+# Upgrade pip
 & "$installDir\Scripts\python.exe" -m pip install --upgrade pip 2>&1 | Out-Null
-
 # Install clawmetry
 Write-Host "→ Installing clawmetry from PyPI..."
 & "$installDir\Scripts\pip.exe" install --no-cache-dir clawmetry 2>&1 | Out-Null
