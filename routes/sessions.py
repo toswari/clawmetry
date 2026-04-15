@@ -525,20 +525,69 @@ def api_task_runs():
 
 @bp_sessions.route("/api/subagents")
 def api_subagents():
-    """Return sub-agent list with depth/parent fields for the tree view."""
+    """Return sub-agent list with depth/parent fields for the tree view.
+
+    Two data sources merged:
+
+    1. OpenClaw's canonical `subagents` tool via `action=list` — the
+       authoritative registry with explicit `active[]` / `recent[]`
+       arrays. Always preferred when gateway RPC is reachable.
+    2. Fallback / supplement: scan all sessions via `sessions_list` +
+       filter by subagent key pattern (`agent:main:subagent:…`). Catches
+       subagents that outlived the `recent (last 30m)` window.
+    """
     import dashboard as _d
     now_ms = time.time() * 1000
+
+    # Source 1: canonical subagent registry
+    reg_active = []
+    reg_recent = []
+    try:
+        reg = _d._gw_invoke("subagents", {"action": "list"})
+        if reg and isinstance(reg, dict):
+            reg_active = reg.get("active", []) or []
+            reg_recent = reg.get("recent", []) or []
+    except Exception:
+        pass
+
+    # Source 2: full session list for the depth/parent filter
     gw_data = _d._gw_invoke("sessions_list", {"limit": 100, "messageLimit": 0})
     if gw_data and "sessions" in gw_data:
         all_sessions = gw_data["sessions"]
     else:
         all_sessions = _d._get_sessions()
 
+    # Prepend registry entries — normalise to the same shape so the filter
+    # below treats them uniformly. Registry-provided entries always pass
+    # the is_subagent check (they're by definition subagents).
+    seen_keys = set()
+    for entry in reg_active + reg_recent:
+        if not isinstance(entry, dict):
+            continue
+        k = entry.get("key") or entry.get("sessionKey") or ""
+        if not k or k in seen_keys:
+            continue
+        seen_keys.add(k)
+        all_sessions.insert(0, {
+            "key": k,
+            "sessionId": entry.get("sessionId") or k.split(":")[-1],
+            "displayName": entry.get("name") or entry.get("label") or entry.get("displayName") or "",
+            "status": entry.get("status") or "active",
+            "updatedAt": entry.get("updatedAt") or entry.get("lastActiveMs") or now_ms,
+            "startedAt": entry.get("startedAt") or entry.get("createdAt") or now_ms,
+            "model": entry.get("model") or "",
+            "totalTokens": entry.get("totalTokens") or 0,
+            "depth": entry.get("depth") or 1,  # registry entries are subagents
+            "spawnedBy": entry.get("parentKey") or entry.get("spawnedBy"),
+            "_from_registry": True,
+        })
+
     subagents = []
     counts = {"total": 0, "active": 0, "idle": 0, "stale": 0}
     for s in all_sessions:
-        sid = s.get("sessionId") or s.get("key", "")
-        if not sid:
+        sid = s.get("sessionId") or ""
+        key = s.get("key") or ""
+        if not sid and not key:
             continue
         age_ms = now_ms - (s.get("updatedAt") or s.get("lastActiveMs", 0) or 0)
         if age_ms < 120000:
@@ -549,14 +598,23 @@ def api_subagents():
             status = "stale"
         depth = int(s.get("depth", 0) or 0)
         parent = s.get("spawnedBy") or s.get("parentKey") or None
-        is_subagent = depth > 0 or "subagent" in sid.lower() or bool(parent)
+        # OpenClaw keys subagents as `agent:main:subagent:<uuid>` — check the
+        # KEY (not the sessionId UUID) for the substring. Previously we
+        # checked sessionId, which is always a bare UUID → `subagent` match
+        # never fired → subagents never appeared in Active Tasks.
+        is_subagent = (
+            depth > 0
+            or "subagent" in key.lower()
+            or bool(parent)
+        )
         if not is_subagent:
             continue
         tokens = int(s.get("totalTokens") or 0)
         model = s.get("model") or s.get("modelRef") or "unknown"
         display = s.get("displayName") or s.get("label") or sid[:20]
         started = s.get("startedAt") or s.get("updatedAt") or now_ms
-        elapsed_s = max(0, int((now_ms - started) / 1000))
+        elapsed_ms = max(0, int(now_ms - started))
+        elapsed_s = elapsed_ms // 1000
         if elapsed_s < 60:
             runtime = f"{elapsed_s}s"
         elif elapsed_s < 3600:
@@ -567,13 +625,16 @@ def api_subagents():
         counts[status] += 1
         subagents.append({
             "sessionId": sid,
+            "key": key,                 # used by Active Tasks openTaskModal
             "displayName": display,
             "model": model,
             "status": status,
             "depth": depth,
             "parent": parent,
             "totalTokens": tokens,
-            "runtime": runtime,
+            "runtime": runtime,         # formatted string (legacy)
+            "runtimeMs": elapsed_ms,    # numeric ms — used by Active Tasks card
+            "startedAt": started,
             "updatedAt": s.get("updatedAt") or s.get("lastActiveMs", 0),
         })
 

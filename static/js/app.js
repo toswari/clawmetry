@@ -968,8 +968,12 @@ async function loadActiveTasks() {
     // Fetch active sub-agents
     var saData = await fetch('/api/subagents').then(r => r.json()).catch(function() { return {subagents:[]}; });
 
+    // Show anything that's still within the 10-min idle window so the user
+    // always sees recently-spawned subagents even when they've paused for a
+    // beat between turns. `stale` (>10 min) stays hidden to keep the panel
+    // focused on live work.
     var agents = (saData.subagents || []).filter(function(a) {
-      return a.status === 'active';
+      return a.status === 'active' || a.status === 'idle';
     });
 
     if (agents.length === 0) {
@@ -4609,55 +4613,89 @@ function startOverviewRefresh() {
   window._mainActivityTimer = setInterval(loadMainActivity, 5000);
 }
 
+// Overview right-panel Brain stream: reuses /api/brain-history (same source as
+// the full Brain tab) so users see the identical unified event stream here —
+// THINK / AGENT / USER / EXEC / READ / WRITE / SEARCH / SPAWN / CONTEXT / MSG
+// instead of the previous "last tool call only" summary.
 async function loadMainActivity() {
   try {
-    var data = await fetchJsonWithTimeout('/api/main-activity', 3000);
+    var data = await fetchJsonWithTimeout('/api/brain-history?limit=40', 6000);
     var el = document.getElementById('main-activity-list');
     var dot = document.getElementById('main-activity-dot');
     var label = document.getElementById('main-activity-label');
-    if (!data || !data.calls || data.calls.length === 0) {
+    var events = (data && data.events) ? data.events.slice() : [];
+    // /api/brain-history pins CONTEXT events to the top of the array (Brain
+    // tab feature) — for the compact Overview panel we want pure timestamp
+    // desc so the most recent conversation sits at the top.
+    events.sort(function(a, b) {
+      return (b.time || '').localeCompare(a.time || '');
+    });
+
+    if (!events.length) {
       el.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">No recent activity</div>';
-      dot.style.background = '#888';
-      label.textContent = 'No data';
+      if (dot) dot.style.background = '#888';
+      if (label) { label.textContent = 'No data'; label.style.color = 'var(--text-muted)'; }
       return;
     }
-    // Determine active/idle from lastModified
-    var now = Date.now() / 1000;
-    var idle = !data.lastModified || (now - data.lastModified) > 60;
-    if (idle) {
-      dot.style.background = '#f39c12';
-      dot.style.animation = 'none';
-      label.textContent = 'Idle';
-      label.style.color = '#f39c12';
-    } else {
-      dot.style.background = '#2ecc71';
-      dot.style.animation = 'pulse-dot 1.5s ease-in-out infinite';
-      label.textContent = 'Active';
-      label.style.color = '#2ecc71';
+
+    // Activity = newest event within last 60s → pulse green, else idle amber
+    var now = Date.now();
+    var latestTs = 0;
+    events.forEach(function(ev) {
+      var t = Date.parse(ev.time || '');
+      if (!isNaN(t) && t > latestTs) latestTs = t;
+    });
+    var idle = !latestTs || (now - latestTs) > 60000;
+    if (dot) {
+      dot.style.background = idle ? '#f39c12' : '#2ecc71';
+      dot.style.animation = idle ? 'none' : 'pulse-dot 1.5s ease-in-out infinite';
     }
+    if (label) {
+      label.textContent = idle ? 'Idle' : 'Active';
+      label.style.color = idle ? '#f39c12' : '#2ecc71';
+    }
+
+    // Per-type colour + icon table matches Brain tab (#page-brain)
+    var TYPE_STYLE = {
+      USER:     {c:'#9ab4ff', icon:'💬'},
+      AGENT:    {c:'#c0a0ff', icon:'🤖'},
+      THINK:    {c:'#6ec1e4', icon:'🧠'},
+      EXEC:     {c:'#f0c060', icon:'⚡'},
+      READ:     {c:'#78dca7', icon:'📖'},
+      WRITE:    {c:'#78dca7', icon:'✏️'},
+      SEARCH:   {c:'#f28fb0', icon:'🔍'},
+      BROWSER:  {c:'#9cd88a', icon:'🌐'},
+      MSG:      {c:'#8ec7ff', icon:'💬'},
+      SPAWN:    {c:'#d19cf5', icon:'✨'},
+      CONTEXT:  {c:'#9aa8bd', icon:'📚'},
+      RESULT:   {c:'#78dca7', icon:'✓'},
+      TOOL:     {c:'#f0c060', icon:'⚙️'},
+    };
+
     var html = '';
-    for (var i = data.calls.length - 1; i >= 0; i--) {
-      var c = data.calls[i];
+    // Server returns newest-first; render top-down so scroll up = older
+    events.forEach(function(ev) {
+      var t = ev.time ? new Date(ev.time) : null;
       var ts = '';
-      if (c.ts) {
-        try {
-          var d = typeof c.ts === 'number' ? new Date(c.ts > 1e12 ? c.ts : c.ts * 1000) : new Date(c.ts);
-          ts = d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-        } catch(e) { ts = ''; }
+      if (t && !isNaN(t.getTime())) {
+        ts = t.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
       }
-      var summary = (c.summary || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      if (summary.length > 60) summary = summary.substring(0, 57) + '...';
-      html += '<div style="display:flex;gap:5px;align-items:center;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.04);">';
-      var toolLabels = {exec:'Shell',Read:'Read',read:'Read',Edit:'Edit',edit:'Edit',Write:'Write',write:'Write',
-        web_search:'Search',web_fetch:'Fetch',browser:'Browser',message:'Msg',tts:'TTS',process:'Proc',
-        sessions_spawn:'Spawn',sessions_send:'Send',cron:'Cron',gateway:'GW',session_status:'Status',image:'Vision',canvas:'Canvas'};
-      var toolLabel = toolLabels[c.name] || c.name;
-      html += '<span style="color:var(--text-faint);min-width:48px;font-size:10px;">' + ts + '</span>';
-      html += '<span style="font-size:12px;min-width:16px;text-align:center;">' + (c.icon||'⚙️') + '</span>';
-      html += '<span style="color:#8b6fc0;min-width:38px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;">' + toolLabel + '</span>';
-      html += '<span style="color:#c0c0c0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + summary + '">' + summary + '</span>';
+      var type = (ev.type || 'TOOL').toUpperCase();
+      var style = TYPE_STYLE[type] || {c:'#c0c0c0', icon:'•'};
+      var detail = (ev.detail || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      if (detail.length > 80) detail = detail.substring(0, 77) + '…';
+      var src = ev.sourceLabel || ev.source || '';
+      if (src.length > 12) src = src.substring(0, 10) + '…';
+      html += '<div style="display:flex;gap:6px;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);">';
+      html += '<span style="color:var(--text-faint);min-width:58px;font-size:10px;font-variant-numeric:tabular-nums;">' + ts + '</span>';
+      html += '<span style="font-size:12px;min-width:16px;text-align:center;">' + style.icon + '</span>';
+      html += '<span style="color:' + style.c + ';min-width:52px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;">' + type + '</span>';
+      if (src) {
+        html += '<span style="color:var(--text-muted);min-width:48px;font-size:9.5px;overflow:hidden;text-overflow:ellipsis;" title="' + src + '">' + src + '</span>';
+      }
+      html += '<span style="color:#d0d0d0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + detail + '">' + detail + '</span>';
       html += '</div>';
-    }
+    });
     el.innerHTML = html;
   } catch(e) {}
 }
@@ -4893,6 +4931,12 @@ function _startFlowSse() {
         flowStats.events++;
       } else if (type === 'tool_result') {
         var resultTool = evt.tool || 'tool';
+        // Animate the tool→brain path in reverse — the result coming back.
+        animateParticle('path-brain-' + resultTool, '#50c070', 600, true);
+        highlightNode('node-' + resultTool, 1500);
+        setTimeout(function() {
+          animateParticle('path-gw-brain', '#50c070', 500, true);
+        }, 500);
         var resultSnippet = evt.result ? String(evt.result).substring(0, 80).replace(/\n/g, ' ') : '';
         var resultText = '✓ ' + resultTool + (resultSnippet ? ': ' + resultSnippet : ' done');
         addFlowFeedItem(resultText, '#50c070', 'result');
@@ -5108,24 +5152,39 @@ function highlightNode(nodeId, dur) {
   }
 }
 
+// Map full OpenClaw channel names → the short key used in SVG path ids
+// (path-human-<key>, path-<key>-gw). Channels not in this table fall back
+// to the telegram slot path, matching the dynamic Flow channel logic.
+var _CH_PATH_KEY = {
+  telegram: 'tg',
+  signal:   'sig',
+  whatsapp: 'wa',
+  tui:      'tui',
+  webchat:  'webchat',
+};
+function _chPathKey(ch) {
+  if (!ch) return 'tg';
+  return _CH_PATH_KEY[ch] || _CH_PATH_KEY[ch.toLowerCase()] || 'sig';
+}
+function _chNodeId(ch) {
+  // Prefer a dedicated node-<channel>; fall back to signal (the shared slot).
+  var byName = 'node-' + (ch || 'telegram').toLowerCase();
+  return document.getElementById(byName) ? byName : 'node-signal';
+}
+
 function triggerInbound(ch) {
-  ch = ch || 'tg';
-  var chNodeId = ch === 'tg' ? 'node-telegram' : ch === 'sig' ? 'node-signal' : 'node-whatsapp';
-  highlightNode(chNodeId, 3000);
-  animateParticle('path-human-' + ch, '#c0a0ff', 550, false);
+  var key = _chPathKey(ch);
+  highlightNode(_chNodeId(ch), 3000);
+  animateParticle('path-human-' + key, '#c0a0ff', 550, false);
   highlightNode('node-human', 2200);
   setTimeout(function() {
-    animateParticle('path-' + ch + '-gw', '#60a0ff', 800, false);
+    animateParticle('path-' + key + '-gw', '#60a0ff', 800, false);
     highlightNode('node-gateway', 2000);
   }, 400);
   setTimeout(function() {
     animateParticle('path-gw-brain', '#60a0ff', 600, false);
     highlightNode('node-brain', 2500);
   }, 1050);
-  setTimeout(function() {
-    animateParticle('path-brain-session', '#60a0ff', 400, false);
-    highlightNode('node-session', 1500);
-  }, 1550);
   setTimeout(function() { triggerInfraNetwork(); }, 300);
 }
 
@@ -5150,14 +5209,15 @@ function triggerToolCall(toolName) {
 }
 
 function triggerOutbound(ch) {
-  ch = ch || 'tg';
+  var key = _chPathKey(ch);
   animateParticle('path-gw-brain', '#50e080', 600, true);
   highlightNode('node-gateway', 2000);
   setTimeout(function() {
-    animateParticle('path-' + ch + '-gw', '#50e080', 800, true);
+    animateParticle('path-' + key + '-gw', '#50e080', 800, true);
+    highlightNode(_chNodeId(ch), 2200);
   }, 500);
   setTimeout(function() {
-    animateParticle('path-human-' + ch, '#50e080', 550, true);
+    animateParticle('path-human-' + key, '#50e080', 550, true);
     highlightNode('node-human', 1800);
   }, 1200);
   setTimeout(function() { triggerInfraNetwork(); }, 200);
@@ -5781,6 +5841,7 @@ function openCompModal(nodeId) {
   if (_toolRefreshTimer) { clearInterval(_toolRefreshTimer); _toolRefreshTimer = null; }
   if (_costOptimizerRefreshTimer) { clearInterval(_costOptimizerRefreshTimer); _costOptimizerRefreshTimer = null; }
   if (window._genericChannelTimer) { clearInterval(window._genericChannelTimer); window._genericChannelTimer = null; }
+  if (window._tuiRefreshTimer) { clearInterval(window._tuiRefreshTimer); window._tuiRefreshTimer = null; }
   if (_webchatRefreshTimer) { clearInterval(_webchatRefreshTimer); _webchatRefreshTimer = null; }
   if (_ircRefreshTimer) { clearInterval(_ircRefreshTimer); _ircRefreshTimer = null; }
   if (_bbRefreshTimer) { clearInterval(_bbRefreshTimer); _bbRefreshTimer = null; }
@@ -5795,6 +5856,14 @@ function openCompModal(nodeId) {
   _currentTimeContext = null;
   document.getElementById('time-travel-toggle').classList.remove('active');
   document.getElementById('time-travel-bar').classList.remove('active');
+
+  if (nodeId === 'node-tui') {
+    document.getElementById('comp-modal-body').innerHTML = '<div style="text-align:center;padding:40px;"><div class="pulse"></div> Loading TUI messages...</div>';
+    document.getElementById('comp-modal-overlay').classList.add('open');
+    loadTuiMessages(false);
+    window._tuiRefreshTimer = setInterval(function() { loadTuiMessages(true); }, 10000);
+    return;
+  }
 
   if (nodeId === 'node-telegram') {
     _tgOffset = 0;
@@ -5895,7 +5964,9 @@ function openCompModal(nodeId) {
   }
 
   // Generic channel handler for all other channel types
-  var GENERIC_CHANNELS = ['node-tui','node-googlechat',
+  // TUI has a dedicated branch below (below the telegram branch) with a
+  // proper chat-bubble renderer + <think>-block stripping.
+  var GENERIC_CHANNELS = ['node-googlechat',
     'node-msteams','node-matrix','node-mattermost','node-line',
     'node-nostr','node-twitch','node-feishu','node-zalo'];
   if (GENERIC_CHANNELS.indexOf(nodeId) !== -1 && c.chKey) {
@@ -6009,6 +6080,77 @@ function loadTelegramMessages(isRefresh) {
     if (!isCompModalActive(expectedNodeId)) return;
     if (!isRefresh) {
       document.getElementById('comp-modal-body').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-error);">Failed to load messages</div>';
+    }
+  });
+}
+
+function loadTuiMessages(isRefresh) {
+  var expectedNodeId = 'node-tui';
+  fetch('/api/channel/tui?limit=50').then(function(r) { return r.json(); }).then(function(data) {
+    if (!isCompModalActive(expectedNodeId)) return;
+    var msgs = data.messages || [];
+    var body = document.getElementById('comp-modal-body');
+
+    // Scrub OpenClaw-specific junk from the raw transcript text:
+    //   `<think>...</think>` reasoning blocks (hidden by default)
+    //   `[Wed 2026-04-15 22:49 GMT+2] ` timestamp prefix (duplicates the bubble timestamp)
+    //   `[[reply_to_current]]` directive markers
+    function cleanTui(text, dir) {
+      if (!text) return '';
+      text = String(text);
+      // Extract and hide thinking blocks; keep final text
+      text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+      // Strip leading channel timestamp `[Wed 2026-04-15 22:49 GMT+2]`
+      text = text.replace(/^\[[A-Za-z]{3}\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}\s+[A-Z]{2,5}[+-]?\d*\]\s*/, '');
+      // Strip assistant directive tokens
+      text = text.replace(/\[\[reply_to_current\]\]\s*/g, '');
+      return text.trim();
+    }
+
+    var html = '<div class="tg-stats">' +
+               '<span class="in">📥 ' + (data.todayIn || 0) + ' incoming</span>' +
+               '<span class="out">📤 ' + (data.todayOut || 0) + ' outgoing</span>' +
+               '<span style="margin-left:auto;color:var(--text-muted);font-size:11px;">' +
+               (data.status === 'connected' ? '⌨️ Connected' : '') + '</span>' +
+               '</div>';
+    html += '<div class="tg-chat">';
+    if (msgs.length === 0) {
+      html += '<div style="text-align:center;padding:24px;color:var(--text-muted);">' +
+              '<div style="font-size:32px;margin-bottom:8px;">⌨️</div>' +
+              '<div>No TUI messages yet.</div>' +
+              '<div style="font-size:11px;margin-top:4px;">Type in the OpenClaw terminal to see messages here.</div>' +
+              '</div>';
+    }
+    // Render oldest → newest inside the scroll region (scrolled to bottom after)
+    msgs.slice().reverse().forEach(function(m) {
+      var dir = m.direction === 'in' ? 'in' : 'out';
+      var ts = '', date = '';
+      try {
+        var d = new Date(m.timestamp);
+        if (!isNaN(d.getTime())) {
+          ts = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+          date = d.toLocaleDateString([], {month:'short',day:'numeric'});
+        }
+      } catch(e) {}
+      var text = cleanTui(m.text, dir) || (dir === 'in' ? '(message received)' : '(reply sent)');
+      html += '<div class="tg-bubble ' + dir + '">';
+      html += '<div class="tg-sender">' + escapeHtml(m.sender || (dir === 'in' ? 'User' : 'Clawd')) + '</div>';
+      html += '<div class="tg-text md-rendered">' + renderMarkdown(text) + '</div>';
+      html += '<div class="tg-time">' + (date ? date + ' ' : '') + ts + '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+    body.innerHTML = html;
+    var scroll = body.querySelector('.tg-chat');
+    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    var f = document.getElementById('comp-modal-footer');
+    if (f) f.textContent = 'Last updated: ' + new Date().toLocaleTimeString() +
+      ' - ' + (data.total || msgs.length) + ' total TUI messages';
+  }).catch(function() {
+    if (!isCompModalActive(expectedNodeId)) return;
+    if (!isRefresh) {
+      document.getElementById('comp-modal-body').innerHTML =
+        '<div style="text-align:center;padding:20px;color:var(--text-error);">Failed to load TUI messages</div>';
     }
   });
 }
