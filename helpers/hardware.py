@@ -94,3 +94,85 @@ def _detect_host_hardware():
     except Exception:
         pass
     return {"cpu": cpu, "cores": cores, "ram_gb": ram_gb, "backend": backend}
+
+
+# ── LMStudio Detection ────────────────────────────────────────────────────
+
+def detect_lmstudio_installed():
+    """Check if LMStudio is installed on the system."""
+    import sys
+    
+    # macOS: Check Applications folder
+    if os.path.exists("/Applications/LMStudio.app"):
+        return True
+    # macOS: Check home directory
+    if os.path.exists(os.path.expanduser("~/Applications/LMStudio.app")):
+        return True
+    # macOS: Check Downloads (common location for fresh downloads)
+    if os.path.exists(os.path.expanduser("~/Downloads/LMStudio.app")):
+        return True
+    
+    # Windows: Check Program Files
+    if sys.platform == "win32":
+        if os.path.exists("C:\\Program Files\\LMStudio\\LMStudio.exe"):
+            return True
+        if os.path.exists("C:\\Program Files (x86)\\LMStudio\\LMStudio.exe"):
+            return True
+        # Check user's local app data
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        if local_appdata and os.path.exists(os.path.join(local_appdata, "LMStudio\\LMStudio.exe")):
+            return True
+    
+    # Linux: Check common locations
+    if sys.platform.startswith("linux"):
+        if os.path.exists("/opt/lmstudio/lmstudio"):
+            return True
+        if os.path.exists(os.path.expanduser("~/.local/share/lmstudio/lmstudio")):
+            return True
+    
+    return False
+
+
+def detect_lmstudio_server_running(port=1234):
+    """Check if LMStudio server is running on the specified port."""
+    import socket
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex(('localhost', port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+
+def get_lmstudio_models(port=1234):
+    """Fetch list of loaded models from LMStudio server."""
+    try:
+        import urllib.request
+        import json
+        
+        url = f"http://localhost:{port}/v1/models"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            return [m.get("id", "") for m in data.get("data", [])]
+    except Exception:
+        return []
+
+
+def get_lmstudio_status():
+    """Get comprehensive LMStudio status."""
+    installed = detect_lmstudio_installed()
+    running = detect_lmstudio_server_running()
+    models = get_lmstudio_models() if running else []
+    
+    return {
+        "installed": installed,
+        "running": running,
+        "models": models,
+        "port": 1234,
+        "server_url": f"http://localhost:1234"
+    }

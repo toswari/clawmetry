@@ -8761,4 +8761,192 @@ function _ncEsc(s) {
     }).catch(function(){});
   } catch(e) {}
 })();
+
+// === Cost Optimizer Modal Functions ===
+
+function openCostOptimizerModal() {
+  document.getElementById('cost-optimizer-modal').style.display = 'flex';
+  loadCostOptimizerData();
+}
+
+async function loadCostOptimizerData() {
+  try {
+    var resp = await fetch('/api/cost-optimizer');
+    var data = await resp.json();
+    
+    // Update cost overview
+    document.getElementById('cost-today-display').textContent = '$' + (data.todayCost || 0).toFixed(3);
+    document.getElementById('cost-month-display').textContent = '$' + (data.projectedMonthlyCost || 0).toFixed(2);
+    document.getElementById('savings-hint').textContent = data.potentialSavings || '';
+    
+    // Update hardware
+    var hw = data.system || {};
+    var badges = [];
+    if (hw.cpu) badges.push('<span style="background:var(--bg-accent);padding:4px 10px;border-radius:6px;font-size:12px;">' + hw.cpu + '</span>');
+    if (hw.cores) badges.push('<span style="background:var(--bg-secondary);padding:4px 10px;border-radius:6px;font-size:12px;">' + hw.cores + ' cores</span>');
+    if (hw.ram_gb) badges.push('<span style="background:var(--bg-secondary);padding:4px 10px;border-radius:6px;font-size:12px;">' + hw.ram_gb + 'GB RAM</span>');
+    if (hw.backend) badges.push('<span style="background:var(--text-success);padding:4px 10px;border-radius:6px;font-size:12px;">' + hw.backend + '</span>');
+    document.getElementById('hardware-badges').innerHTML = badges.join('');
+    
+    // Update models
+    var models = (data.localModels || []).map(function(m) { return m.name || m; });
+    if (models.length === 0) {
+      document.getElementById('models-list').innerHTML = '<div style="color:var(--text-muted);font-size:12px;">No local models found. Install Ollama or LMStudio.</div>';
+    } else {
+      document.getElementById('models-list').innerHTML = models.map(function(m) {
+        return '<div style="background:var(--bg-tertiary);padding:8px 12px;border-radius:6px;font-size:12px;">' + m + '</div>';
+      }).join('');
+    }
+    
+    // Update task recommendations
+    var tasks = data.taskRecommendations || [];
+    if (tasks.length === 0) {
+      document.getElementById('task-recommendations').innerHTML = '<div style="color:var(--text-muted);font-size:12px;">No recommendations available.</div>';
+    } else {
+      document.getElementById('task-recommendations').innerHTML = tasks.map(function(t) {
+        return '<div style="background:var(--bg-tertiary);padding:12px;border-radius:8px;">' +
+          '<div style="display:flex;justify-content:space-between;margin-bottom:4px;">' +
+            '<span style="font-weight:600;font-size:13px;">' + (t.task || 'Unknown task') + '</span>' +
+            '<span style="color:var(--text-success);font-size:12px;">' + (t.estimatedSavings || '') + '</span>' +
+          '</div>' +
+          '<div style="font-size:11px;color:var(--text-muted);">' + 
+            (t.currentModel || 'cloud') + ' → ' + (t.suggestedLocal || 'keep') +
+          '</div>' +
+          '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + (t.reason || '') + '</div>' +
+        '</div>';
+      }).join('');
+    }
+    
+    // Update LMStudio UI
+    updateLMStudioUI(data.lmstudio);
+    
+    // Update footer
+    document.getElementById('optimizer-last-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+    document.getElementById('llmfit-check').textContent = data.llmfitAvailable ? '✓' : '-';
+    
+  } catch (e) {
+    console.error('Failed to load cost optimizer data:', e);
+  }
+}
+
+function updateLMStudioUI(lmstudio) {
+  if (!lmstudio) return;
+  
+  var installed = lmstudio.installed || false;
+  var running = lmstudio.running || false;
+  var models = lmstudio.models || [];
+  
+  // Update install button
+  var installBtn = document.getElementById('btn-install-lmstudio');
+  if (installBtn) {
+    if (installed) {
+      installBtn.textContent = '✓ LMStudio Installed';
+      installBtn.style.background = 'var(--bg-secondary)';
+    } else {
+      installBtn.textContent = '📦 Install LMStudio';
+      installBtn.style.background = 'var(--button-bg)';
+    }
+  }
+  
+  // Update server button
+  var serverBtn = document.getElementById('btn-lmstudio-server');
+  if (serverBtn) {
+    if (running) {
+      serverBtn.textContent = '⏹ Stop LMStudio Server';
+      serverBtn.style.background = 'var(--bg-error)';
+    } else {
+      serverBtn.textContent = '⚡ LMStudio Server';
+      serverBtn.style.background = 'var(--button-bg)';
+    }
+  }
+  
+  // Update status display
+  var statusEl = document.getElementById('lmstudio-status-display');
+  if (statusEl) {
+    var status = [];
+    if (installed) status.push('Installed');
+    if (running) status.push('Server running (' + models.length + ' models)');
+    if (!installed && !running) status.push('Not installed');
+    statusEl.textContent = status.join(' • ');
+  }
+  
+  // Update footer
+  var footerEl = document.getElementById('lmstudio-check');
+  if (footerEl) {
+    if (running) footerEl.textContent = '✓ Running';
+    else if (installed) footerEl.textContent = '✓ Installed';
+    else footerEl.textContent = '-';
+  }
+}
+
+// LMStudio functions
+async function installLMStudio() {
+  var confirmMsg = 'Install LMStudio from lmstudio.ai?\n\n' +
+    'LMStudio provides a GUI for managing and running local LLMs.\n' +
+    'Requires ~500MB download.';
+  
+  if (!confirm(confirmMsg)) return;
+  
+  try {
+    var resp = await fetch('/api/lmstudio/install', { method: 'POST' });
+    var data = await resp.json();
+    
+    if (data.url) {
+      window.open(data.url, '_blank');
+    }
+    
+    // Refresh status after a delay
+    setTimeout(loadCostOptimizerData, 5000);
+  } catch (e) {
+    console.error('Failed to install LMStudio:', e);
+  }
+}
+
+async function toggleLMStudioServer() {
+  try {
+    var resp = await fetch('/api/lmstudio/status');
+    var status = await resp.json();
+    
+    if (status.running) {
+      // Try to stop (will fail, but show message)
+      var stopResp = await fetch('/api/lmstudio/stop', { method: 'POST' });
+      var stopData = await stopResp.json();
+      alert(stopData.message || stopData.error);
+    } else {
+      alert('Please start the LMStudio server from the LMStudio application.\n\n' +
+        '1. Open LMStudio\n' +
+        '2. Load a model\n' +
+        '3. Click "Start Server" in the right panel');
+    }
+    
+    setTimeout(loadCostOptimizerData, 3000);
+  } catch (e) {
+    console.error('Failed to toggle LMStudio server:', e);
+  }
+}
+
+async function browseLMStudioModels() {
+  window.open('https://lmstudio.ai/models', '_blank');
+}
+
+// Ollama functions (placeholder - implement as needed)
+async function installOllama() {
+  window.open('https://ollama.ai', '_blank');
+}
+
+async function toggleOllamaServe() {
+  alert('ollama serve command:\n\nollama serve\n\nOr use: brew services start ollama');
+}
+
+async function browseModels() {
+  window.open('https://ollama.ai/library', '_blank');
+}
+
+// Refresh cost optimizer data every 30 seconds when modal is open
+setInterval(function() {
+  var modal = document.getElementById('cost-optimizer-modal');
+  if (modal && modal.style.display === 'flex') {
+    loadCostOptimizerData();
+  }
+}, 30000);
 } } // end if(false) stub */

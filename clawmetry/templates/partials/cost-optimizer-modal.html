@@ -1,0 +1,241 @@
+<!-- Cost Optimizer Modal -->
+<div id="cost-optimizer-modal" style="
+  display:none;
+  position:fixed;
+  inset:0;
+  z-index:1300;
+  background:rgba(0,0,0,0.6);
+  align-items:center;
+  justify-content:center;
+  ">
+  <div style="
+    background:var(--bg-primary);
+    border:1px solid var(--border-primary);
+    border-radius:16px;
+    width:90%;
+    max-width:600px;
+    max-height:85vh;
+    overflow-y:auto;
+    box-shadow:0 25px 50px rgba(0,0,0,0.3);
+    ">
+    <!-- Header -->
+    <div style="
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding:16px 20px;
+      border-bottom:1px solid var(--border-secondary);
+      ">
+      <h3 style="font-size:18px;font-weight:700;color:var(--text-primary);">
+        💰 Cost Optimizer
+      </h3>
+      <button onclick="document.getElementById('cost-optimizer-modal').style.display='none'" style="
+        background:var(--button-bg);
+        border:1px solid var(--border-primary);
+        border-radius:8px;
+        width:32px;
+        height:32px;
+        cursor:pointer;
+        font-size:18px;
+        color:var(--text-tertiary);
+        ">&times;</button>
+    </div>
+    
+    <!-- Content -->
+    <div style="padding:20px;">
+      <!-- Cost Overview -->
+      <div id="cost-overview-section" style="
+        background:var(--bg-secondary);
+        border:1px solid var(--border-primary);
+        border-radius:12px;
+        padding:16px;
+        margin-bottom:16px;
+        ">
+        <h4 style="font-size:14px;font-weight:600;color:var(--text-success);margin:0 0 12px;">
+          💰 Cost Overview
+        </h4>
+        <div style="display:flex;gap:24px;">
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Today</div>
+            <div id="cost-today-display" style="font-size:24px;font-weight:700;color:var(--text-warning);">$0.000</div>
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Month Projected</div>
+            <div id="cost-month-display" style="font-size:24px;font-weight:700;color:var(--text-warning);">$0.00</div>
+          </div>
+        </div>
+        <div id="savings-hint" style="
+          margin-top:12px;
+          padding:8px 12px;
+          background:rgba(22,163,74,0.1);
+          border:1px solid var(--text-success);
+          border-radius:8px;
+          font-size:12px;
+          color:var(--text-success);
+          "></div>
+      </div>
+      
+      <!-- Hardware Info -->
+      <div id="hardware-section" style="
+        background:var(--bg-secondary);
+        border:1px solid var(--border-primary);
+        border-radius:12px;
+        padding:16px;
+        margin-bottom:16px;
+        ">
+        <h4 style="font-size:14px;font-weight:600;color:var(--text-primary);margin:0 0 12px;">
+          💻 Your Hardware
+        </h4>
+        <div id="hardware-badges" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+        <div id="hardware-warning" style="
+          display:none;
+          margin-top:12px;
+          padding:8px 12px;
+          background:rgba(245,158,11,0.1);
+          border:1px solid var(--text-warning);
+          border-radius:8px;
+          font-size:12px;
+          color:var(--text-warning);
+          "></div>
+      </div>
+      
+      <!-- Recommended Models -->
+      <div id="models-section" style="
+        background:var(--bg-secondary);
+        border:1px solid var(--border-primary);
+        border-radius:12px;
+        padding:16px;
+        margin-bottom:16px;
+        ">
+        <h4 style="font-size:14px;font-weight:600;color:var(--text-primary);margin:0 0 12px;">
+          🤖 Recommended Local Models
+        </h4>
+        <div id="models-list" style="display:grid;gap:8px;"></div>
+      </div>
+      
+      <!-- Task Recommendations -->
+      <div id="tasks-section" style="
+        background:var(--bg-secondary);
+        border:1px solid var(--border-primary);
+        border-radius:12px;
+        padding:16px;
+        margin-bottom:16px;
+        ">
+        <h4 style="font-size:14px;font-weight:600;color:var(--text-primary);margin:0 0 12px;">
+          📋 Task Recommendations
+        </h4>
+        <div id="task-recommendations" style="display:grid;gap:10px;"></div>
+      </div>
+      
+      <!-- Quick Actions -->
+      <div id="quick-actions-section" style="
+        background:var(--bg-secondary);
+        border:1px solid var(--border-primary);
+        border-radius:12px;
+        padding:16px;
+        ">
+        <h4 style="font-size:14px;font-weight:600;color:var(--text-primary);margin:0 0 12px;">
+          ⚡ Quick Actions
+        </h4>
+        
+        <!-- Ollama Actions -->
+        <div id="ollama-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+          <button id="btn-install-ollama" onclick="installOllama()" style="
+            background:#3b82f6;
+            color:#fff;
+            border:none;
+            border-radius:8px;
+            padding:8px 16px;
+            font-size:13px;
+            font-weight:600;
+            cursor:pointer;
+            ">&#128230; Install Ollama</button>
+          <button id="btn-ollama-serve" onclick="toggleOllamaServe()" style="
+            background:var(--button-bg);
+            color:var(--text-primary);
+            border:1px solid var(--border-primary);
+            border-radius:8px;
+            padding:8px 16px;
+            font-size:13px;
+            cursor:pointer;
+            ">⚡ ollama serve</button>
+          <button onclick="browseModels()" style="
+            background:var(--button-bg);
+            color:var(--text-primary);
+            border:1px solid var(--border-primary);
+            border-radius:8px;
+            padding:8px 16px;
+            font-size:13px;
+            cursor:pointer;
+            ">🔍 Browse Models</button>
+        </div>
+        
+        <!-- LMStudio Actions (NEW) -->
+        <div style="
+          border-top:1px solid var(--border-secondary);
+          padding-top:12px;
+          margin-top:12px;
+          ">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+            LMStudio Alternative
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;">
+            <button id="btn-install-lmstudio" onclick="installLMStudio()" style="
+              background:var(--button-bg);
+              color:var(--text-primary);
+              border:1px solid var(--border-primary);
+              border-radius:8px;
+              padding:8px 16px;
+              font-size:13px;
+              cursor:pointer;
+              ">&#128230; Install LMStudio</button>
+            <button id="btn-lmstudio-server" onclick="toggleLMStudioServer()" style="
+              background:var(--button-bg);
+              color:var(--text-primary);
+              border:1px solid var(--border-primary);
+              border-radius:8px;
+              padding:8px 16px;
+              font-size:13px;
+              cursor:pointer;
+              ">⚡ LMStudio Server</button>
+            <button id="btn-browse-lmstudio" onclick="browseLMStudioModels()" style="
+              background:var(--button-bg);
+              color:var(--text-primary);
+              border:1px solid var(--border-primary);
+              border-radius:8px;
+              padding:8px 16px;
+              font-size:13px;
+              cursor:pointer;
+              ">🔍 Browse Models</button>
+          </div>
+          <div id="lmstudio-status-display" style="
+            margin-top:8px;
+            font-size:11px;
+            color:var(--text-muted);
+            "></div>
+        </div>
+      </div>
+      
+      <!-- Footer -->
+      <div style="
+        margin-top:16px;
+        padding-top:12px;
+        border-top:1px solid var(--border-secondary);
+        font-size:11px;
+        color:var(--text-muted);
+        display:flex;
+        flex-wrap:wrap;
+        gap:8px;
+        align-items:center;
+        ">
+        <span>Auto-refreshing</span>
+        <span>•</span>
+        <span id="optimizer-last-updated">Last updated: --:--:--</span>
+        <span>•</span>
+        <span id="optimizer-llmfit-status">llmfit <span id="llmfit-check">-</span></span>
+        <span>•</span>
+        <span id="optimizer-lmstudio-status">LMStudio: <span id="lmstudio-check">-</span></span>
+      </div>
+    </div>
+  </div>
+</div>

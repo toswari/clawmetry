@@ -7958,6 +7958,8 @@ DASHBOARD_HTML = r"""
 
 {% include 'partials/budget-modal.html' %}
 
+{% include 'partials/cost-optimizer-modal.html' %}
+
 <!-- OVERVIEW (Split-Screen Hacker Dashboard) -->
 {% include 'tabs/overview.html' %}
 

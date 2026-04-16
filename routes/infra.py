@@ -736,6 +736,10 @@ def api_cost_optimizer():
         today = costs.get("today", 0) or 0
         projected = costs.get("projected", 0) or (today * 30)
 
+        # Check LMStudio availability
+        from helpers.hardware import get_lmstudio_status
+        lmstudio_status = get_lmstudio_status()
+        
         return jsonify(
             {
                 "system": system_out,
@@ -747,11 +751,20 @@ def api_cost_optimizer():
                 "expensiveOps": expensive_ops,
                 "ollamaInstalled": ollama_installed,
                 "llmfitAvailable": bool(llmfit_raw),
+                # NEW: Add LMStudio status
+                "lmstudio": lmstudio_status,
             }
         )
     except Exception as e:
         # Hard fallback path: even llmfit + everything else broke. Use real
         # host detection so we never lie about the user's machine.
+        # Check LMStudio availability (fallback)
+        try:
+            from helpers.hardware import get_lmstudio_status
+            lmstudio_status = get_lmstudio_status()
+        except Exception:
+            lmstudio_status = {"installed": False, "running": False, "models": [], "port": 1234}
+        
         return jsonify(
             {
                 "system": _d._detect_host_hardware(),
@@ -763,6 +776,7 @@ def api_cost_optimizer():
                 "error": str(e),
                 "ollamaInstalled": False,
                 "llmfitAvailable": False,
+                "lmstudio": lmstudio_status,
             }
         )
 
@@ -851,3 +865,128 @@ def api_automation_analysis():
             'error': str(e),
             'lastAnalysis': datetime.now(timezone.utc).isoformat()
         })
+
+
+# ── LMStudio API Endpoints ──────────────────────────────────────────────────
+
+
+@bp_config.route("/api/lmstudio/status")
+def api_lmstudio_status():
+    """Get LMStudio installation and server status."""
+    from helpers.hardware import get_lmstudio_status
+    return jsonify(get_lmstudio_status())
+
+
+@bp_config.route("/api/lmstudio/install", methods=["POST"])
+def api_lmstudio_install():
+    """Trigger LMStudio installation (platform-specific)."""
+    import platform
+    import sys
+    
+    system = platform.system().lower()
+    
+    if system == "darwin":  # macOS
+        return jsonify({
+            "ok": True,
+            "method": "download",
+            "url": "https://lmstudio.ai",
+            "message": "Please download LMStudio from lmstudio.ai",
+            "instructions": [
+                "1. Click the download button to open lmstudio.ai",
+                "2. Click 'Download LMStudio for macOS'",
+                "3. Open the downloaded .dmg file",
+                "4. Drag LMStudio to Applications folder",
+                "5. Open LMStudio from Applications",
+                "6. Download and load a model",
+                "7. Click 'Start Server' in the right panel"
+            ]
+        })
+    elif system == "windows":
+        return jsonify({
+            "ok": True,
+            "method": "download",
+            "url": "https://lmstudio.ai",
+            "message": "Please download LMStudio installer from lmstudio.ai",
+            "instructions": [
+                "1. Click the download button to open lmstudio.ai",
+                "2. Click 'Download LMStudio for Windows'",
+                "3. Run the downloaded installer",
+                "4. Open LMStudio",
+                "5. Download and load a model",
+                "6. Click 'Start Server' in the right panel"
+            ]
+        })
+    elif system == "linux":
+        return jsonify({
+            "ok": True,
+            "method": "download",
+            "url": "https://lmstudio.ai",
+            "message": "Please download LMStudio AppImage from lmstudio.ai",
+            "instructions": [
+                "1. Click the download button to open lmstudio.ai",
+                "2. Click 'Download LMStudio for Linux'",
+                "3. Make the AppImage executable: chmod +x LMStudio.AppImage",
+                "4. Run: ./LMStudio.AppImage",
+                "5. Download and load a model",
+                "6. Click 'Start Server' in the right panel"
+            ]
+        })
+    
+    return jsonify({
+        "ok": False,
+        "error": f"Unsupported platform: {system}",
+        "url": "https://lmstudio.ai"
+    }), 400
+
+
+@bp_config.route("/api/lmstudio/start", methods=["POST"])
+def api_lmstudio_start():
+    """Start LMStudio server (requires GUI app to be running)."""
+    from helpers.hardware import detect_lmstudio_server_running
+    
+    if detect_lmstudio_server_running():
+        return jsonify({
+            "ok": True,
+            "message": "Server already running",
+            "running": True
+        })
+    
+    # LMStudio server is started from the GUI app
+    return jsonify({
+        "ok": False,
+        "error": "Please start the LMStudio server from the LMStudio application",
+        "instructions": [
+            "1. Open LMStudio application",
+            "2. Download a model if you haven't already",
+            "3. Load the model by clicking on it",
+            "4. Click 'Start Server' button in the right panel",
+            "5. The server will run on http://localhost:1234"
+        ]
+    })
+
+
+@bp_config.route("/api/lmstudio/stop", methods=["POST"])
+def api_lmstudio_stop():
+    """Stop LMStudio server."""
+    # LMStudio doesn't have a CLI to stop the server
+    return jsonify({
+        "ok": False,
+        "error": "Please stop the server from the LMStudio application",
+        "instructions": [
+            "1. Open LMStudio application",
+            "2. Click 'Stop Server' button in the right panel",
+            "Alternatively, you can quit the LMStudio application"
+        ]
+    })
+
+
+@bp_config.route("/api/lmstudio/models")
+def api_lmstudio_models():
+    """Get list of models available in LMStudio."""
+    from helpers.hardware import get_lmstudio_models
+    models = get_lmstudio_models()
+    return jsonify({
+        "models": models,
+        "count": len(models),
+        "server_url": "http://localhost:1234"
+    })

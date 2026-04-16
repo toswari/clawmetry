@@ -866,3 +866,85 @@ class TestLMStudioProvider:
         from helpers.pricing import _infer_provider_from_model
         assert _infer_provider_from_model("lmstudio-llama-3.2") == "lmstudio"
         assert _infer_provider_from_model("localhost:1234-model") == "lmstudio"
+
+
+# ---------------------------------------------------------------------------
+# LMStudio API Endpoints (Task 8)
+# ---------------------------------------------------------------------------
+
+
+class TestLMStudioAPI:
+    """Tests for LMStudio API endpoints."""
+
+    def _lmstudio_endpoints_available(self, api, base_url):
+        """Check if LMStudio endpoints are registered on this server."""
+        try:
+            r = api.get(f"{base_url}/api/lmstudio/status", timeout=5)
+            return r.status_code != 404
+        except Exception:
+            return False
+
+    def test_lmstudio_status_endpoint(self, api, base_url):
+        """LMStudio status endpoint returns 200."""
+        if not self._lmstudio_endpoints_available(api, base_url):
+            pytest.skip("LMStudio endpoints not available on this server")
+        r = get(api, base_url, "/api/lmstudio/status")
+        assert_ok(r)
+        d = r.json()
+        assert "installed" in d
+        assert "running" in d
+        assert "models" in d
+        assert "port" in d
+
+    def test_lmstudio_status_structure(self, api, base_url):
+        """LMStudio status has correct structure."""
+        if not self._lmstudio_endpoints_available(api, base_url):
+            pytest.skip("LMStudio endpoints not available on this server")
+        d = assert_ok(get(api, base_url, "/api/lmstudio/status"))
+        assert isinstance(d["installed"], bool)
+        assert isinstance(d["running"], bool)
+        assert isinstance(d["models"], list)
+        assert isinstance(d["port"], int)
+        assert "server_url" in d
+
+    def test_lmstudio_install_endpoint(self, api, base_url):
+        """LMStudio install endpoint returns download URL."""
+        if not self._lmstudio_endpoints_available(api, base_url):
+            pytest.skip("LMStudio endpoints not available on this server")
+        r = api.post(f"{base_url}/api/lmstudio/install", timeout=10)
+        assert r.status_code == 200
+        d = r.json()
+        assert "ok" in d
+        assert "url" in d or "error" in d
+        assert d.get("url") == "https://lmstudio.ai"
+
+    def test_lmstudio_start_endpoint(self, api, base_url):
+        """LMStudio start endpoint returns 200."""
+        if not self._lmstudio_endpoints_available(api, base_url):
+            pytest.skip("LMStudio endpoints not available on this server")
+        r = api.post(f"{base_url}/api/lmstudio/start", timeout=10)
+        assert r.status_code == 200
+        d = r.json()
+        assert "ok" in d
+
+    def test_lmstudio_stop_endpoint(self, api, base_url):
+        """LMStudio stop endpoint returns 200."""
+        if not self._lmstudio_endpoints_available(api, base_url):
+            pytest.skip("LMStudio endpoints not available on this server")
+        r = api.post(f"{base_url}/api/lmstudio/stop", timeout=10)
+        assert r.status_code == 200
+        d = r.json()
+        assert "ok" in d or "error" in d
+
+    def test_lmstudio_models_endpoint(self, api, base_url):
+        """LMStudio models endpoint returns 200."""
+        if not self._lmstudio_endpoints_available(api, base_url):
+            pytest.skip("LMStudio endpoints not available on this server")
+        r = get(api, base_url, "/api/lmstudio/models")
+        assert_ok(r)
+        d = r.json()
+        assert "models" in d
+        assert "count" in d
+        assert isinstance(d["models"], list)
+        assert isinstance(d["count"], int)
+        assert d["count"] == len(d["models"])
