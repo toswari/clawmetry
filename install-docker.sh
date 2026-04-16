@@ -2,7 +2,7 @@
 # ClawMetry — Docker installer
 # Usage: curl -fsSL https://clawmetry.com/install-docker.sh | bash
 #
-# This script builds the latest ClawMetry from source and runs it in Docker.
+# This script pulls the latest ClawMetry Docker image and runs it.
 set -e
 
 # Colors
@@ -29,32 +29,16 @@ fi
 
 echo -e "  ${GREEN}✓${NC} Docker found: $(docker --version)"
 
-# ── Get ClawMetry Source ────────────────────────────────────────────────────────
-
-CLAWMETRY_DIR="${CLAWMETRY_DIR:-./clawmetry-docker}"
+# ── Pull Docker Image ──────────────────────────────────────────────────────────
 
 echo ""
-echo -e "  → Fetching latest ClawMetry from GitHub..."
+echo -e "  → Pulling latest ClawMetry Docker image..."
 
-if [ -d "$CLAWMETRY_DIR" ]; then
-    echo -e "  ${DIM}→ Updating existing clone in $CLAWMETRY_DIR${NC}"
-    (cd "$CLAWMETRY_DIR" && git fetch --depth=1 origin main && git reset --hard origin/main)
-else
-    git clone --depth=1 https://github.com/toswari/clawmetry.git "$CLAWMETRY_DIR"
-fi
+IMAGE_NAME="${CLAWMETRY_IMAGE:-toswari/clawmetry:latest}"
 
-cd "$CLAWMETRY_DIR"
+docker pull "$IMAGE_NAME" 2>&1 | tail -5
 
-# ── Build Docker Image ──────────────────────────────────────────────────────────
-
-echo ""
-echo -e "  → Building Docker image..."
-
-IMAGE_NAME="${CLAWMETRY_IMAGE:-clawmetry:latest}"
-
-docker build -t "$IMAGE_NAME" . 2>&1 | tail -5
-
-echo -e "  ${GREEN}✓${NC} Image built: $IMAGE_NAME"
+echo -e "  ${GREEN}✓${NC} Image pulled: $IMAGE_NAME"
 
 # ── Create Data Volume ──────────────────────────────────────────────────────────
 
