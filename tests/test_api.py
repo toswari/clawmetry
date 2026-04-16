@@ -815,3 +815,54 @@ class TestPluginTrend:
         """days param limits the response window."""
         d = assert_ok(get(api, base_url, "/api/usage/by-plugin/trend?days=7"))
         assert len(d["days"]) == 7, f"Expected 7 days, got {len(d['days'])}"
+
+
+# ---------------------------------------------------------------------------
+# LMStudio Provider Detection (GH #XXX)
+# ---------------------------------------------------------------------------
+
+
+class TestLMStudioProvider:
+    """Tests for LMStudio local LLM provider detection and pricing."""
+
+    def test_lmstudio_in_provider_map(self):
+        """LMStudio is registered in PROVIDER_MAP."""
+        from clawmetry.providers_pricing import PROVIDER_MAP
+        assert "localhost:1234" in PROVIDER_MAP
+        assert "127.0.0.1:1234" in PROVIDER_MAP
+        assert PROVIDER_MAP["localhost:1234"]["name"] == "lmstudio"
+        assert PROVIDER_MAP["127.0.0.1:1234"]["name"] == "lmstudio"
+
+    def test_lmstudio_zero_cost(self):
+        """LMStudio has zero cost (local inference)."""
+        from clawmetry.providers_pricing import PROVIDER_MAP
+        for host in ["localhost:1234", "127.0.0.1:1234"]:
+            assert PROVIDER_MAP[host]["input_per_1m"] == 0.0
+            assert PROVIDER_MAP[host]["output_per_1m"] == 0.0
+
+    def test_lmstudio_model_overrides(self):
+        """LMStudio models have zero cost overrides."""
+        from clawmetry.providers_pricing import MODEL_OVERRIDES
+        lmstudio_models = ["llama", "qwen", "phi", "mistral", "deepseek", "gemma", "mixtral", "codellama", "neural"]
+        for model in lmstudio_models:
+            assert ("lmstudio", model) in MODEL_OVERRIDES
+            assert MODEL_OVERRIDES[("lmstudio", model)] == (0.0, 0.0)
+
+    def test_estimate_cost_lmstudio_zero(self):
+        """estimate_cost_usd returns 0 for LMStudio."""
+        from clawmetry.providers_pricing import estimate_cost_usd
+        for model in ["llama-3.2", "qwen2.5-7b", "phi-4", "deepseek-r1"]:
+            cost = estimate_cost_usd("lmstudio", 1000000, 500000, model)
+            assert cost == 0.0, f"Expected 0.0 for {model}, got {cost}"
+
+    def test_provider_from_model_detects_lmstudio_prefix(self):
+        """_provider_from_model detects lmstudio/ prefix."""
+        from helpers.pricing import _provider_from_model
+        assert _provider_from_model("lmstudio/llama-3.2") == "lmstudio"
+        assert _provider_from_model("localhost:1234/qwen2.5") == "lmstudio"
+
+    def test_infer_provider_detects_lmstudio_substring(self):
+        """_infer_provider_from_model detects lmstudio substring."""
+        from helpers.pricing import _infer_provider_from_model
+        assert _infer_provider_from_model("lmstudio-llama-3.2") == "lmstudio"
+        assert _infer_provider_from_model("localhost:1234-model") == "lmstudio"

@@ -15,7 +15,7 @@ def _provider_from_model(model_name):
 
     Prefix and substring match: `openai/`, `anthropic/`, `google/`,
     `openrouter/`, `xai/`; substring fallbacks for `gpt`, `codex`, `o1`,
-    `claude`, `gemini`, `grok`.
+    `claude`, `gemini`, `grok`, `lmstudio`.
     """
     m = str(model_name or "").lower()
     if m.startswith("openai/") or "gpt" in m or "codex" in m or m.startswith("o1"):
@@ -28,6 +28,9 @@ def _provider_from_model(model_name):
         return "openrouter"
     if m.startswith("xai/") or "grok" in m:
         return "xai"
+    # LMStudio local models
+    if m.startswith("lmstudio/") or m.startswith("localhost:1234/"):
+        return "lmstudio"
     return "unknown"
 
 
@@ -37,7 +40,7 @@ def _infer_provider_from_model(model_name):
     Looser than `_provider_from_model` — matches substrings so
     `claude-3-5-sonnet` → anthropic without needing a prefix. Also
     recognises `local/other` for open-weights families (llama, mistral,
-    qwen, deepseek).
+    qwen, deepseek) and `lmstudio` for local models.
     """
     m = (model_name or "").lower()
     if not m:
@@ -50,6 +53,9 @@ def _infer_provider_from_model(model_name):
         return "openai"
     if "gemini" in m:
         return "google"
+    # LMStudio local models
+    if "lmstudio" in m or m.startswith("localhost:1234"):
+        return "lmstudio"
     if "llama" in m or "mistral" in m or "qwen" in m or "deepseek" in m:
         return "local/other"
     return "unknown"

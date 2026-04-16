@@ -71,6 +71,17 @@ PROVIDER_MAP: dict[str, dict] = {
         "input_per_1m": 2.50,
         "output_per_1m": 10.00,
     },
+    # Local LLM providers (zero cost)
+    "localhost:1234": {
+        "name": "lmstudio",
+        "input_per_1m": 0.0,
+        "output_per_1m": 0.0,
+    },
+    "127.0.0.1:1234": {
+        "name": "lmstudio",
+        "input_per_1m": 0.0,
+        "output_per_1m": 0.0,
+    },
 }
 
 # Model-specific overrides (provider, model_prefix) -> (input_per_1m, output_per_1m)
@@ -95,6 +106,16 @@ MODEL_OVERRIDES: dict[tuple[str, str], tuple[float, float]] = {
     ("mistral", "mistral-medium"): (0.70, 2.10),
     ("mistral", "mistral-large"): (2.00, 6.00),
     ("mistral", "codestral"): (0.20, 0.60),
+    # LMStudio local models (zero cost)
+    ("lmstudio", "llama"): (0.0, 0.0),
+    ("lmstudio", "qwen"): (0.0, 0.0),
+    ("lmstudio", "phi"): (0.0, 0.0),
+    ("lmstudio", "mistral"): (0.0, 0.0),
+    ("lmstudio", "deepseek"): (0.0, 0.0),
+    ("lmstudio", "gemma"): (0.0, 0.0),
+    ("lmstudio", "mixtral"): (0.0, 0.0),
+    ("lmstudio", "codellama"): (0.0, 0.0),
+    ("lmstudio", "neural"): (0.0, 0.0),
 }
 
 

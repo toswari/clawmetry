@@ -42,6 +42,10 @@ class ClawMetryConfig:
     # Auth
     auth_token: Optional[str] = None
 
+    # Local LLM Providers
+    lmstudio_host: str = "localhost:1234"
+    lmstudio_enabled: bool = True
+
     def from_globals(self, _dashboard_module=None) -> "ClawMetryConfig":
         """
         Populate from dashboard.py module-level globals (migration bridge).

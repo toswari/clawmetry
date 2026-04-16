@@ -158,6 +158,43 @@ services:
 - OpenClaw running on the same machine (or mounted volumes for Docker)
 - Linux or macOS
 
+## Supported Providers
+
+ClawMetry tracks token usage and costs across multiple LLM providers:
+
+| Provider | Cost Tracking | Notes |
+|----------|---------------|-------|
+| **Anthropic** | ✅ Full | Claude 3.x, Claude 4 models |
+| **OpenAI** | ✅ Full | GPT-4o, GPT-4 Turbo, o1, o3 |
+| **Google** | ✅ Full | Gemini 2.0 Flash, Vertex AI |
+| **Mistral** | ✅ Full | Mistral Large, Small, Codestral |
+| **Groq** | ✅ Full | Llama 3.3 70B |
+| **Together** | ✅ Full | Various open models |
+| **OpenRouter** | ✅ Full | Multi-provider aggregator |
+| **Cohere** | ✅ Full | Command R+ |
+| **AWS Bedrock** | ✅ Full | Claude via Bedrock |
+| **Azure AI** | ✅ Full | Azure OpenAI |
+| **LMStudio** | ✅ Free | Local LLM inference (zero cost) |
+| **Local/Other** | ✅ Free | Ollama, llama.cpp, etc. |
+
+### Local LLM Support (LMStudio, Ollama)
+
+ClawMetry automatically detects local LLM providers and tracks them at **$0.00 cost**:
+
+- **LMStudio**: Auto-detected via `localhost:1234` hostname or `lmstudio/` model prefix
+- **Ollama**: Auto-detected via `localhost:11434` hostname
+- **Other local models**: Models with `llama`, `mistral`, `qwen`, `deepseek` in the name are classified as "local/other"
+
+```bash
+# LMStudio server running on default port
+# Models requested via localhost:1234/v1 are tracked as $0.00
+
+# Example model names that trigger local detection:
+# - lmstudio/llama-3.2
+# - localhost:1234/qwen2.5-7b
+# - llama-3-70b (via local/other fallback)
+```
+
 ## NemoClaw / OpenShell Support
 
 ClawMetry automatically detects [NemoClaw](https://github.com/NVIDIA/NemoClaw) — NVIDIA's enterprise security wrapper for OpenClaw that runs agents inside sandboxed OpenShell containers.

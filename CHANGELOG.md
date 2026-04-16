@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Added
+- **LMStudio support** — Local LLM inference tracking at $0.00 cost (closes #XXX)
+  - Auto-detection via `localhost:1234` hostname and `lmstudio/` model prefix
+  - Zero-cost pricing for common local models (llama, qwen, phi, mistral, deepseek, gemma, mixtral, codellama)
+  - New `TestLMStudioProvider` test class with 6 tests for provider detection and pricing
+  - Configuration options: `lmstudio_host`, `lmstudio_enabled`
+
 ### Fixed
 - **`pip install clawmetry` now actually works end-to-end.** Since the routes/ helpers/ templates/ extractions (0.12.90-series), the published wheels silently omitted the non-Python asset directories — installed users' dashboards 404'd on `/static/js/app.js` and failed at import because `from routes.sessions import bp_sessions` had no target. `static/` and `templates/` now ship under the `clawmetry/` package; `routes/` and `helpers/` are declared top-level packages. A new `wheel-install` CI job verifies every release by installing the wheel in a fresh venv and requesting `/static/js/app.js`.
 - **Structural move**: `static/*` → `clawmetry/static/*`, `templates/*` → `clawmetry/templates/*`. `app = Flask(...)` now passes `static_folder` / `template_folder` pointed at the package-relative paths. URL surface (`/static/...`) unchanged; users see no behavioural difference.
