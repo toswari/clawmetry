@@ -1,6 +1,6 @@
 #!/bin/bash
 # ClawMetry — Docker installer
-# Usage: curl -fsSL https://clawmetry.com/install-docker.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/toswari/clawmetry/main/install-docker.sh | bash
 #
 # This script pulls the latest ClawMetry Docker image and runs it.
 set -e
