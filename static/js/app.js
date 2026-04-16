@@ -968,13 +968,22 @@ async function loadActiveTasks() {
     // Fetch active sub-agents
     var saData = await fetch('/api/subagents').then(r => r.json()).catch(function() { return {subagents:[]}; });
 
-    // Show anything that's still within the 10-min idle window so the user
-    // always sees recently-spawned subagents even when they've paused for a
-    // beat between turns. `stale` (>10 min) stays hidden to keep the panel
-    // focused on live work.
-    var agents = (saData.subagents || []).filter(function(a) {
-      return a.status === 'active' || a.status === 'idle';
+    // "Active Tasks" should mean ACTIVE. Previously we lingered failed
+    // and stale entries here for 24h, which meant a subagent that failed
+    // hours ago still appeared as if it were current. Tightened:
+    //   - active / idle: always show (subagent still alive)
+    //   - failed: only within the last 10 minutes, and only when there's
+    //     nothing live — so a just-failed spawn still surfaces briefly.
+    //   - stale / older failures: don't show. The subagent detail modal
+    //     and the Brain tab are the right surfaces for history.
+    var RECENT_MS = 10 * 60 * 1000;
+    var now = Date.now();
+    var all = (saData.subagents || []);
+    var live = all.filter(function(a) { return a.status === 'active' || a.status === 'idle'; });
+    var recentFailed = all.filter(function(a) {
+      return a.status === 'failed' && (now - (a.updatedAt || 0)) < RECENT_MS;
     });
+    var agents = live.length ? live : recentFailed.slice(0, 3);
 
     if (agents.length === 0) {
       grid.innerHTML = '<div class="card" style="text-align:center;padding:24px;color:var(--text-muted);grid-column:1/-1;">'
@@ -987,21 +996,48 @@ async function loadActiveTasks() {
 
     var html = '';
     var badge = document.getElementById('overview-tasks-count-badge');
-    if (badge) badge.textContent = agents.length + ' active';
+    if (badge) {
+      var liveCount = agents.filter(function(a) { return a.status === 'active' || a.status === 'idle'; }).length;
+      badge.textContent = liveCount > 0 ? (liveCount + ' active') : (agents.length + ' recent');
+    }
 
-    // Render active sub-agents
+    // Per-status visual style
+    var STATUS_STYLE = {
+      active: {cls: 'running',  dot: '#22c55e', label: 'active'},
+      idle:   {cls: 'running',  dot: '#f59e0b', label: 'idle'},
+      stale:  {cls: '',         dot: '#6b7280', label: 'completed'},
+      failed: {cls: '',         dot: '#ef4444', label: 'failed'},
+    };
+
+    // Render sub-agents
     agents.forEach(function(agent) {
       var taskName = cleanTaskName(agent.displayName);
       var badge2 = detectProjectBadge(agent.displayName);
       var mins = Math.max(1, Math.floor((agent.runtimeMs || 0) / 60000));
+      var st = STATUS_STYLE[agent.status] || STATUS_STYLE.active;
 
-      html += '<div class="task-card running" style="cursor:pointer;" onclick="openTaskModal(\'' + escHtml(agent.sessionId).replace(/'/g,"\\'") + '\',\'' + escHtml(taskName).replace(/'/g,"\\'") + '\',\'' + escHtml(agent.key || agent.sessionId).replace(/'/g,"\\'") + '\')">';
-      html += '<div class="task-card-pulse active"></div>';
+      html += '<div class="task-card ' + st.cls + '" style="cursor:pointer;" onclick="openTaskModal(\'' + escHtml(agent.sessionId).replace(/'/g,"\\'") + '\',\'' + escHtml(taskName).replace(/'/g,"\\'") + '\',\'' + escHtml(agent.key || agent.sessionId).replace(/'/g,"\\'") + '\')">';
+      if (agent.status === 'active' || agent.status === 'idle') {
+        html += '<div class="task-card-pulse active"></div>';
+      }
       html += '<div class="task-card-header">';
-      html += '<div class="task-card-name">' + escHtml(taskName) + '</div>';
-      html += '<span class="task-card-badge running" style="font-size:10px;">🤖 ' + mins + ' min</span>';
+      html += '<div class="task-card-name"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + st.dot + ';margin-right:6px;vertical-align:middle;"></span>' + escHtml(taskName) + '</div>';
+      html += '<span class="task-card-badge ' + st.cls + '" style="font-size:10px;">' +
+              (agent.status === 'failed' ? '⚠️ ' + st.label :
+               agent.status === 'stale'  ? '🤖 ' + st.label :
+               '🤖 ' + mins + ' min') +
+              '</span>';
       html += '</div>';
-      html += '<div style="display:flex;align-items:center;gap:8px;">';
+      // Task summary line (shown for all statuses if present)
+      if (agent.task) {
+        var taskPreview = agent.task.length > 90 ? agent.task.substring(0, 87) + '…' : agent.task;
+        html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:4px;line-height:1.4;">' + escHtml(taskPreview) + '</div>';
+      }
+      // The failed badge in the top-right already conveys status; the raw
+      // OpenClaw error string ("Validation failed for tool 'subagents':")
+      // was redundant on the card and too jargon-y. Full error is still
+      // surfaced in the modal when the user clicks through.
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-top:4px;">';
       if (badge2) {
         html += '<span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;font-weight:700;background:' + badge2.color + '22;color:' + badge2.color + ';border:1px solid ' + badge2.color + '44;">' + badge2.label + '</span>';
       }
@@ -3097,10 +3133,7 @@ function startHealthStream() {
 // ===== System Health Panel =====
 async function loadSystemHealth() {
   try {
-    var d = await fetch('/api/system-health').then(function(r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    });
+    var d = await fetchJsonWithTimeout('/api/system-health', 4000);
     var services = Array.isArray(d.services) ? d.services : [];
     var channels = Array.isArray(d.channels) ? d.channels : [];
     var disks = Array.isArray(d.disks) ? d.disks : [];
@@ -4336,8 +4369,9 @@ async function loadSubagents() {
       }
     });
     function statusDot(status) {
-      var colors = { active: '#16a34a', idle: '#d97706', stale: '#6b7280' };
-      var glow = status === 'active' ? 'box-shadow:0 0 6px rgba(22,163,74,0.6);' : '';
+      var colors = { active: '#16a34a', idle: '#d97706', stale: '#6b7280', failed: '#ef4444' };
+      var glow = status === 'active' ? 'box-shadow:0 0 6px rgba(22,163,74,0.6);'
+               : status === 'failed' ? 'box-shadow:0 0 6px rgba(239,68,68,0.5);' : '';
       return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + (colors[status] || '#6b7280') + ';' + glow + 'flex-shrink:0;margin-right:4px;"></span>';
     }
     function renderAgent(a, depth) {
@@ -4350,11 +4384,21 @@ async function loadSubagents() {
         : '<span style="display:inline-block;min-width:16px;"></span>';
       var tokens = a.totalTokens >= 1000 ? (a.totalTokens / 1000).toFixed(1) + 'K' : a.totalTokens;
       var depthBadge = a.depth > 0 ? '<span style="font-size:10px;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:4px;padding:1px 5px;color:var(--text-muted);margin-left:6px;">d' + a.depth + '</span>' : '';
-      var html = '<div style="display:flex;align-items:center;gap:6px;' + indent + 'padding-top:8px;padding-bottom:8px;padding-right:12px;border-bottom:1px solid var(--border-secondary);">';
+      // Click row → subagent detail modal (same call used by Active Tasks cards).
+      // Stop-propagation on the toggle button already handles tree expansion.
+      var name = (a.displayName || '').replace(/"/g,'&quot;').replace(/'/g,"\\'");
+      var sidEsc = (a.sessionId || '').replace(/'/g,"\\'");
+      var keyEsc = (a.key || a.sessionId || '').replace(/'/g,"\\'");
+      var clickAttr = ' onclick="openTaskModal(\'' + sidEsc + '\',\'' + name + '\',\'' + keyEsc + '\')"';
+      var cursor = 'cursor:pointer;';
+      var html = '<div' + clickAttr + ' style="display:flex;align-items:center;gap:6px;' + indent + 'padding-top:8px;padding-bottom:8px;padding-right:12px;border-bottom:1px solid var(--border-secondary);' + cursor + 'transition:background 0.1s;" onmouseover="this.style.background=\'var(--bg-hover)\'" onmouseout="this.style.background=\'\'">';
       html += toggleBtn;
       html += statusDot(a.status);
       html += '<span style="font-weight:600;font-size:13px;color:var(--text-primary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(a.displayName) + '">' + escHtml(a.displayName) + '</span>';
       html += depthBadge;
+      if (a.status === 'failed') {
+        html += '<span style="font-size:10px;background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.4);border-radius:4px;padding:1px 6px;margin-left:6px;font-weight:700;">FAILED</span>';
+      }
       html += '<span style="font-size:11px;color:var(--text-muted);white-space:nowrap;margin-left:8px;">' + escHtml(a.model || '') + '</span>';
       html += '<span style="font-size:11px;color:var(--text-muted);white-space:nowrap;margin-left:8px;">' + tokens + ' tok</span>';
       html += '<span style="font-size:11px;color:var(--text-faint);white-space:nowrap;margin-left:8px;">' + escHtml(a.runtime || '') + '</span>';
@@ -4369,6 +4413,7 @@ async function loadSubagents() {
     if (counts.active) summaryHtml += '<span style="color:#16a34a;"><strong>' + counts.active + '</strong> active</span>';
     if (counts.idle) summaryHtml += '<span style="color:#d97706;"><strong>' + counts.idle + '</strong> idle</span>';
     if (counts.stale) summaryHtml += '<span style="color:var(--text-muted);"><strong>' + counts.stale + '</strong> stale</span>';
+    if (counts.failed) summaryHtml += '<span style="color:#ef4444;"><strong>' + counts.failed + '</strong> failed</span>';
     summaryHtml += '</div>';
     var treeHtml = '<div style="border:1px solid var(--border-primary);border-radius:10px;overflow:hidden;">' + summaryHtml;
     roots.forEach(function(a) { treeHtml += renderAgent(a, 0); });
@@ -5657,7 +5702,7 @@ function _ovRenderCard(agent, idx) {
 
 async function loadOverviewTasks() {
   try {
-    var data = await fetch('/api/subagents').then(function(r){return r.json();});
+    var data = await fetchJsonWithTimeout('/api/subagents', 4000);
     var el = document.getElementById('overview-tasks-list');
     var countBadge = document.getElementById('overview-tasks-count-badge');
     if (!el) return true;
@@ -7682,16 +7727,25 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 function openTaskModal(sessionId, taskName, sessionKey) {
-  _modalSessionId = sessionId;
-  document.getElementById('modal-title').textContent = taskName || sessionId;
+  _modalSessionId = sessionId || '';
+  window._modalSessionKey = sessionKey || '';  // used by the fallback renderer
+  document.getElementById('modal-title').textContent = taskName || sessionId || sessionKey;
   document.getElementById('modal-session-key').textContent = sessionKey || sessionId;
   document.getElementById('task-modal-overlay').classList.add('open');
   document.getElementById('modal-content').innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-muted);">Loading transcript...</div>';
   _modalTab = 'summary';
   document.querySelectorAll('.modal-tab').forEach(function(t,i){t.classList.toggle('active',i===0);});
   loadModalTranscript();
-  if (_modalAutoRefresh) {
+  // Auto-refresh only makes sense for LIVE subagents (those with a sessionId
+  // whose transcript can update). Failed/stale entries open in fallback mode
+  // and their data is immutable — refreshing just causes flicker. The user
+  // can re-enable via the checkbox if needed.
+  if (_modalAutoRefresh && sessionId) {
     _modalRefreshTimer = setInterval(loadModalTranscript, 4000);
+  } else {
+    // Reflect the disabled state in the checkbox so the UX matches.
+    var cb = document.getElementById('modal-auto-refresh-cb');
+    if (cb && !sessionId) cb.checked = false;
   }
   document.addEventListener('keydown', _modalEscHandler);
 }
@@ -7720,25 +7774,298 @@ function switchModalTab(tab) {
 }
 
 async function loadModalTranscript() {
-  if (!_modalSessionId) return;
+  // Failed-spawn subagents have sessionId="" (no child was created), so
+  // don't bail on empty here — fall straight into the fallback which
+  // looks up metadata by key.
+  if (!_modalSessionId && !window._modalSessionKey) return;
+
+  // Only hit the transcript endpoint when we actually have a sessionId.
+  if (_modalSessionId) {
+    try {
+      var r = await fetch('/api/transcript-events/' + encodeURIComponent(_modalSessionId));
+      var data = await r.json();
+      if (!data.error && data.events && data.events.length) {
+        _modalEvents = data.events;
+        var ec = document.getElementById('modal-event-count');
+        if (ec) ec.textContent = '📊 ' + _modalEvents.length + ' events';
+        var mc = document.getElementById('modal-msg-count');
+        if (mc) mc.textContent = '💬 ' + (data.messageCount || 0) + ' messages';
+        // Real transcript available — restore the Summary/Narrative/Full Logs
+        // tab strip + footer that the fallback renderer swapped out.
+        var tabsEl = document.querySelector('#task-modal-overlay .modal-tabs');
+        if (tabsEl) {
+          tabsEl.style.display = '';
+          if (tabsEl.dataset.fallbackMode && tabsEl.dataset.originalHTML) {
+            tabsEl.innerHTML = tabsEl.dataset.originalHTML;
+            delete tabsEl.dataset.fallbackMode;
+            delete tabsEl.dataset.originalHTML;
+          }
+        }
+        var footer = document.querySelector('#task-modal-overlay .modal-footer');
+        if (footer) footer.style.display = '';
+        renderModalContent();
+        return;
+      }
+      // data.error or zero events → fall through to the fallback renderer.
+    } catch(e) { /* network error — fall through */ }
+  }
+  // No transcript (empty sessionId, 404, or zero events). Render the
+  // spawn metadata we already have from /api/subagents.
+  _renderModalSpawnInfo(_modalSessionId || window._modalSessionKey || '', 'No transcript available');
+}
+
+// Fallback view when child transcript is gone (OpenClaw TTL) or empty.
+// Reads /api/subagents (the list already surfaces task / error / model /
+// runtime) and finds the matching entry by sessionId or key. Renders a
+// card-style summary with the spawn metadata + any error OpenClaw
+// returned. Works for failed spawns AND stale successful ones.
+// Which fallback pane is active. Persists across auto-refresh cycles so
+// switching to "Brain Events" doesn't snap back to "Overview" every 4s.
+window._fallbackTab = window._fallbackTab || 'overview';
+
+function _switchFallbackTab(tab) {
+  window._fallbackTab = tab;
+  // Toggle tab-strip active state
+  document.querySelectorAll('#task-modal-overlay .modal-tab').forEach(function(t) {
+    t.classList.toggle('active', (t.dataset.fallbackTab || '') === tab);
+  });
+  // Toggle pane visibility
+  var ov = document.getElementById('fallback-pane-overview');
+  var br = document.getElementById('fallback-pane-brain');
+  if (ov) ov.style.display = (tab === 'overview') ? '' : 'none';
+  if (br) br.style.display = (tab === 'brain')    ? '' : 'none';
+}
+
+async function _renderModalSpawnInfo(sessionIdOrKey, reason) {
+  var el = document.getElementById('modal-content');
+  if (!el) return;
+  // Only show the "Loading..." placeholder on the first render. Subsequent
+  // re-renders (tab switches, auto-refresh) keep the existing content
+  // visible until the fetch resolves, avoiding a flicker that makes the
+  // modal hard to read through.
+  var alreadyRendered = !!document.getElementById('fallback-pane-overview');
+  if (!alreadyRendered) {
+    el.innerHTML = '<div style="padding:20px;color:var(--text-muted);">Loading subagent info...</div>';
+  }
   try {
-    var r = await fetch('/api/transcript-events/' + encodeURIComponent(_modalSessionId));
-    var data = await r.json();
-    if (data.error) {
-      document.getElementById('modal-content').innerHTML = '<div style="padding:20px;color:var(--text-error);">Error: ' + escHtml(data.error) + '</div>';
+    var saData = await fetch('/api/subagents').then(function(r){return r.json();}).catch(function(){return {subagents:[]};});
+    var entries = saData.subagents || [];
+    var match = entries.find(function(a) {
+      return a.sessionId === sessionIdOrKey || a.key === sessionIdOrKey;
+    });
+    if (!match) {
+      if (!alreadyRendered) {
+        el.innerHTML = '<div style="padding:20px;color:var(--text-error);">' + escHtml(reason) + '</div>';
+      }
       return;
     }
-    _modalEvents = data.events || [];
-    document.getElementById('modal-event-count').textContent = '📊 ' + _modalEvents.length + ' events';
-    document.getElementById('modal-msg-count').textContent = '💬 ' + (data.messageCount || 0) + ' messages';
-    renderModalContent();
+    // Idempotency guard: if the critical fields haven't changed AND the DOM
+    // already contains the rendered overview pane (i.e. this isn't the first
+    // render), skip rebuilding. We check `fallback-pane-overview` presence
+    // so a fresh openTaskModal (which resets modal-content) always re-paints
+    // even when the fingerprint coincidentally matches a previous subagent.
+    var fingerprint = JSON.stringify([
+      match.status, match.task, match.error, match.completionResult,
+      match.completionStatus, match.runtimeFormatted, match.tokensIn, match.tokensOut,
+    ]);
+    if (document.getElementById('fallback-pane-overview')
+        && el.dataset.spawnFingerprint === fingerprint) {
+      return;
+    }
+    var startedAt = match.startedAt ? new Date(match.startedAt).toLocaleString() : '';
+    var statusColor = { active:'#22c55e', idle:'#f59e0b', stale:'#6b7280', failed:'#ef4444' }[match.status] || '#6b7280';
+
+    // Build Overview pane HTML
+    var overviewHtml = '<div style="padding:20px;display:flex;flex-direction:column;gap:16px;">';
+    overviewHtml += '<div style="display:flex;align-items:center;gap:10px;">'
+                 +  '<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:' + statusColor + ';"></span>'
+                 +  '<strong style="font-size:15px;color:var(--text-primary);">' + escHtml(match.displayName || 'subagent') + '</strong>'
+                 +  '<span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;">' + escHtml(match.status) + '</span>'
+                 +  '</div>';
+    if (match.task) {
+      overviewHtml += '<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;margin-bottom:6px;">Task</div>'
+                   +  '<div style="font-size:13px;color:var(--text-primary);line-height:1.5;white-space:pre-wrap;">' + escHtml(match.task) + '</div></div>';
+    }
+    var meta = [];
+    if (startedAt) meta.push(['Started', startedAt]);
+    // Prefer the child's actual runtime (from OpenClaw completion event) over
+    // our "time since spawn" calculation — runtimeFormatted is e.g. "1s",
+    // match.runtime is e.g. "72h 49m" which is misleading for a 1-second run.
+    var rtDisplay = match.runtimeFormatted || match.runtime || '';
+    if (rtDisplay) meta.push(['Runtime', rtDisplay]);
+    if (match.model && match.model !== 'unknown') meta.push(['Model', match.model]);
+    if (match.parent) meta.push(['Parent', match.parent]);
+    if (match.runId) meta.push(['Run ID', match.runId]);
+    if (match.completionStatus) meta.push(['Outcome', match.completionStatus]);
+    if (match.tokensIn || match.tokensOut) {
+      meta.push(['Tokens', 'in ' + (match.tokensIn || 0) + ' / out ' + (match.tokensOut || 0)]);
+    }
+    if (meta.length) {
+      overviewHtml += '<div style="display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:12px;">';
+      meta.forEach(function(row) {
+        overviewHtml += '<div style="color:var(--text-muted);">' + escHtml(row[0]) + '</div>'
+                     +  '<div style="color:var(--text-primary);font-family:monospace;overflow-wrap:anywhere;">' + escHtml(row[1]) + '</div>';
+      });
+      overviewHtml += '</div>';
+    }
+    var logParts = [];
+    if (match.completionResult && match.completionResult !== '(no output)') {
+      logParts.push({ label:'Subagent output', icon:'📤', color:'#22c55e', text: match.completionResult });
+    } else if (match.completionStatus) {
+      logParts.push({ label:'Subagent output', icon:'📤', color:'#6b7280',
+                      text: '(Subagent completed with no output — OpenClaw reported "' + match.completionStatus + '")' });
+    }
+    if (match.spawnAck && !match.error) {
+      logParts.push({ label:'Spawn handshake', icon:'🤝', color:'#3b82f6', text: match.spawnAck });
+    }
+    if (logParts.length) {
+      overviewHtml += '<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;margin-bottom:8px;">Activity</div>';
+      logParts.forEach(function(part) {
+        overviewHtml += '<div style="border:1px solid var(--border-primary);border-radius:8px;margin-bottom:10px;overflow:hidden;">'
+                     +  '<div style="padding:6px 10px;background:var(--bg-secondary);border-bottom:1px solid var(--border-primary);font-size:11px;color:' + part.color + ';font-weight:600;">'
+                     +  part.icon + ' ' + escHtml(part.label) + '</div>'
+                     +  '<pre style="margin:0;padding:10px 12px;font-size:12px;color:var(--text-primary);white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;max-height:260px;overflow:auto;">'
+                     +  escHtml(part.text) + '</pre></div>';
+      });
+      overviewHtml += '</div>';
+    }
+    overviewHtml += '</div>';
+
+    // Brain pane — populated asynchronously by _renderModalBrainEvents.
+    var brainHtml = '<div id="modal-brain-events-slot" style="padding:14px 20px;"></div>';
+
+    // Replace the modal-tabs strip with our 2-tab layout for fallback mode
+    // (Overview / Brain Events). Restored to Summary/Narrative/Full Logs
+    // by loadModalTranscript when a live transcript is found.
+    try {
+      var tabsStrip = document.querySelector('#task-modal-overlay .modal-tabs');
+      if (tabsStrip && !tabsStrip.dataset.fallbackMode) {
+        tabsStrip.dataset.fallbackMode = '1';
+        tabsStrip.dataset.originalHTML = tabsStrip.innerHTML;
+      }
+      if (tabsStrip) {
+        tabsStrip.style.display = '';
+        tabsStrip.innerHTML =
+          '<div class="modal-tab' + (window._fallbackTab === 'overview' ? ' active' : '') + '" data-fallback-tab="overview" onclick="_switchFallbackTab(\'overview\')">Overview</div>' +
+          '<div class="modal-tab' + (window._fallbackTab === 'brain' ? ' active' : '') + '" data-fallback-tab="brain" onclick="_switchFallbackTab(\'brain\')">Brain Events</div>';
+      }
+      // Footer isn't meaningful in fallback (no event/message counters).
+      var footer = document.querySelector('#task-modal-overlay .modal-footer');
+      if (footer) footer.style.display = 'none';
+    } catch(e) {}
+
+    // Render both panes, show the active one.
+    var showOv = window._fallbackTab !== 'brain';
+    el.innerHTML =
+      '<div id="fallback-pane-overview" style="display:' + (showOv ? '' : 'none') + ';">' + overviewHtml + '</div>' +
+      '<div id="fallback-pane-brain" style="display:'    + (showOv ? 'none' : '') + ';">' + brainHtml + '</div>';
+    // Record the fingerprint AFTER the DOM write so concurrent calls don't
+    // see a stored fingerprint that matches the state they're about to
+    // render and bail out before writing anything.
+    el.dataset.spawnFingerprint = fingerprint;
+
+    // Populate Brain events asynchronously (fire-and-forget).
+    _renderModalBrainEvents(match).catch(function(){ /* non-fatal */ });
   } catch(e) {
-    document.getElementById('modal-content').innerHTML = '<div style="padding:20px;color:var(--text-error);">Failed to load transcript</div>';
+    el.innerHTML = '<div style="padding:20px;color:var(--text-error);">' + escHtml(reason) + '</div>';
+  }
+}
+
+// Fetch /api/brain-history and render a per-subagent slice into the slot
+// the spawn-info renderer left behind. Filter rules:
+//   - match by source session UUID (parent OR child)
+//   - time window: 30s before startedAt → 10 min after, or until
+//     completionTs+1min if we have it
+//   - drop CONTEXT entries (they're always present, not actionable here)
+async function _renderModalBrainEvents(match) {
+  var slot = document.getElementById('modal-brain-events-slot');
+  if (!slot) return;
+  try {
+    var parentUuid = (match.parent || '').split(':').pop() || '';
+    var childUuid  = (match.key || '').split(':').pop() || '';
+    var candidates = [parentUuid, childUuid, match.sessionId].filter(Boolean);
+    if (!candidates.length) return;
+
+    var startedMs = match.startedAt || Date.now();
+    var endMs;
+    if (match.completionTs) {
+      var t = Date.parse(match.completionTs);
+      if (!isNaN(t)) endMs = t + 60000;  // +1 min buffer after completion
+    }
+    if (!endMs) endMs = startedMs + 600000;  // default: +10 min
+    var winStart = startedMs - 30000;        // -30s lead-up
+
+    var data = await fetchJsonWithTimeout('/api/brain-history?limit=500', 6000);
+    var events = (data && data.events) ? data.events : [];
+    var filtered = events.filter(function(ev) {
+      if ((ev.type || '').toUpperCase() === 'CONTEXT') return false;
+      var src = ev.source || '';
+      if (candidates.indexOf(src) < 0) return false;
+      var ts = Date.parse(ev.time || '');
+      if (isNaN(ts)) return true;  // keep undated events
+      return ts >= winStart && ts <= endMs;
+    });
+    // Sort ascending (chronological) for reading top-to-bottom.
+    filtered.sort(function(a, b) {
+      return (a.time || '').localeCompare(b.time || '');
+    });
+
+    if (!filtered.length) {
+      slot.innerHTML = '<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;margin-bottom:8px;">Brain events</div>'
+                     + '<div style="padding:10px 12px;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:6px;font-size:12px;color:var(--text-muted);">'
+                     + 'No Brain events found in the window around this spawn ('
+                     + new Date(winStart).toLocaleTimeString() + ' – '
+                     + new Date(endMs).toLocaleTimeString() + ').</div></div>';
+      return;
+    }
+
+    var TYPE_STYLE = {
+      USER:{c:'#9ab4ff',icon:'💬'}, AGENT:{c:'#c0a0ff',icon:'🤖'},
+      THINK:{c:'#6ec1e4',icon:'🧠'}, EXEC:{c:'#f0c060',icon:'⚡'},
+      READ:{c:'#78dca7',icon:'📖'}, WRITE:{c:'#78dca7',icon:'✏️'},
+      SEARCH:{c:'#f28fb0',icon:'🔍'}, BROWSER:{c:'#9cd88a',icon:'🌐'},
+      MSG:{c:'#8ec7ff',icon:'💬'}, SPAWN:{c:'#d19cf5',icon:'✨'},
+      RESULT:{c:'#78dca7',icon:'✓'}, TOOL:{c:'#f0c060',icon:'⚙️'},
+    };
+
+    var rows = '';
+    filtered.forEach(function(ev) {
+      var type = (ev.type || 'TOOL').toUpperCase();
+      var style = TYPE_STYLE[type] || {c:'#c0c0c0', icon:'•'};
+      var t = ev.time ? new Date(ev.time) : null;
+      var ts = t && !isNaN(t.getTime())
+        ? t.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'})
+        : '';
+      var detail = escHtml(ev.detail || '');
+      if (detail.length > 200) detail = detail.substring(0, 197) + '…';
+      var src = ev.sourceLabel || ev.source || '';
+      if (src.length > 14) src = src.substring(0, 12) + '…';
+      rows += '<div style="display:flex;gap:8px;align-items:flex-start;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">'
+           +  '<span style="color:var(--text-faint);min-width:62px;font-size:10.5px;font-variant-numeric:tabular-nums;">' + ts + '</span>'
+           +  '<span style="font-size:12px;min-width:16px;text-align:center;">' + style.icon + '</span>'
+           +  '<span style="color:' + style.c + ';min-width:54px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;">' + type + '</span>'
+           +  '<span style="color:#d0d0d0;flex:1;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.45;">' + detail + '</span>'
+           +  '</div>';
+    });
+    slot.innerHTML = '<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;">'
+                   + '<span>🧠 Brain events</span>'
+                   + '<span style="color:var(--text-faint);font-weight:500;text-transform:none;letter-spacing:0;">'
+                   + '(' + filtered.length + ' entries around this spawn)</span></div>'
+                   + '<div style="border:1px solid var(--border-primary);border-radius:8px;background:var(--bg-secondary);padding:4px 12px;max-height:360px;overflow:auto;">'
+                   + rows + '</div></div>';
+  } catch (e) {
+    // Silent — modal already has the essentials, Brain-events is a bonus.
   }
 }
 
 function renderModalContent() {
   var el = document.getElementById('modal-content');
+  // When there's no transcript (failed/GC'd subagent), the fallback
+  // renderer took over — don't overwrite it when the user switches tabs.
+  if (!_modalEvents || !_modalEvents.length) {
+    _renderModalSpawnInfo(_modalSessionId || window._modalSessionKey || '', 'No transcript available');
+    return;
+  }
   if (_modalTab === 'summary') renderModalSummary(el);
   else if (_modalTab === 'narrative') renderModalNarrative(el);
   else renderModalFull(el);
@@ -7930,11 +8257,40 @@ function finishBootOverlay() {
   }
 }
 
+// Safety net: no matter what happens below, dismiss the boot overlay after
+// this cap so users never see "Initializing ClawMetry" forever. Any step that
+// finishes later will still update its own slice of the UI when it returns.
+var BOOT_HARD_TIMEOUT_MS = 8000;
+var _bootFinished = false;
+function _safeFinishBoot() {
+  if (_bootFinished) return;
+  _bootFinished = true;
+  finishBootOverlay();
+}
+
+function _withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise(function(_, reject) {
+      setTimeout(function() { reject(new Error((label || 'step') + ' timeout')); }, ms);
+    })
+  ]);
+}
+
 async function bootDashboard() {
+  // Hard floor: dismiss overlay after BOOT_HARD_TIMEOUT_MS no matter what.
+  // The dashboard stays usable with partial data; individual panels show
+  // their own empty / loading states while slower requests land.
+  setTimeout(_safeFinishBoot, BOOT_HARD_TIMEOUT_MS);
+
   // Check auth first -- if not valid, show login and abort boot
   try {
     var stored = localStorage.getItem('clawmetry-token');
-    var authRes = await fetch('/api/auth/check' + (stored ? '?token=' + encodeURIComponent(stored) : ''));
+    var authRes = await _withTimeout(
+      fetch('/api/auth/check' + (stored ? '?token=' + encodeURIComponent(stored) : '')),
+      3000,
+      'auth'
+    );
     var authData = await authRes.json();
     if (authData.needsSetup) {
       document.getElementById('login-overlay').style.display = 'none';
@@ -7942,37 +8298,58 @@ async function bootDashboard() {
       gwo.dataset.mandatory = 'true';
       document.getElementById('gw-setup-close').style.display = 'none';
       gwo.style.display = 'flex';
-      finishBootOverlay();
+      _safeFinishBoot();
       return;
     }
     if (authData.authRequired && !authData.valid) {
       document.getElementById('login-overlay').style.display = 'flex';
-      finishBootOverlay();
+      _safeFinishBoot();
       return;
     }
-  } catch(e) {}
+  } catch(e) { /* auth check hung -- boot anyway, safety timeout will fire */ }
 
   setBootStep('overview', 'loading', 'Loading overview + model context');
-  var okOverview = await loadAll();
-  setBootStep('overview', okOverview ? 'done' : 'fail', okOverview ? 'Overview ready' : 'Overview delayed');
-
   setBootStep('tasks', 'loading', 'Loading active tasks');
-  var okTasks = await loadOverviewTasks();
-  setBootStep('tasks', okTasks ? 'done' : 'fail', okTasks ? 'Tasks ready' : 'Tasks delayed');
-
   setBootStep('health', 'loading', 'Loading system health');
-  var okHealth = await loadSystemHealth();
-  loadSandboxStatus();
-  setBootStep('health', okHealth ? 'done' : 'fail', okHealth ? 'System health ready' : 'System health delayed');
 
+  // Kick off all three primary steps in parallel. If any hangs we surface
+  // "delayed" but the overall boot still completes.
+  var results = await Promise.allSettled([
+    _withTimeout(Promise.resolve().then(loadAll), 5000, 'overview'),
+    _withTimeout(Promise.resolve().then(loadOverviewTasks), 5000, 'tasks'),
+    _withTimeout(Promise.resolve().then(loadSystemHealth), 5000, 'health'),
+  ]);
+  var okOverview = results[0].status === 'fulfilled' && results[0].value !== false;
+  var okTasks    = results[1].status === 'fulfilled' && results[1].value !== false;
+  var okHealth   = results[2].status === 'fulfilled' && results[2].value !== false;
+  setBootStep('overview', okOverview ? 'done' : 'fail', okOverview ? 'Overview ready' : 'Overview delayed');
+  setBootStep('tasks',    okTasks    ? 'done' : 'fail', okTasks    ? 'Tasks ready'    : 'Tasks delayed');
+  setBootStep('health',   okHealth   ? 'done' : 'fail', okHealth   ? 'System health ready' : 'System health delayed');
+  try { loadSandboxStatus(); } catch (e) {}
+
+  // Connect live streams last so they don't eat the waitress thread pool
+  // while the initial fetches are still in flight.
   setBootStep('streams', 'loading', 'Connecting live streams');
   try { startLogStream(); } catch (e) {}
   try { startHealthStream(); } catch (e) {}
   setBootStep('streams', 'done', 'Live streams connected');
 
-  // Pre-fetch crons and memory so they're ready when tabs are clicked
-  try { await loadCrons(); } catch (e) { console.warn('Crons prefetch failed:', e); }
-  try { await loadMemory(); } catch (e) { console.warn('Memory prefetch failed:', e); }
+  // Prefetches and periodic refreshes are background work -- never let them
+  // block the overlay.
+  (async function backgroundPrefetch() {
+    try { await _withTimeout(loadCrons(), 5000, 'crons'); } catch (e) {}
+    try { await _withTimeout(loadMemory(), 5000, 'memory'); } catch (e) {}
+    try {
+      var cronData = await _withTimeout(
+        fetch('/api/crons').then(function(r){return r.json();}),
+        3000,
+        'crons-tab-check'
+      );
+      if (cronData && cronData.jobs && cronData.jobs.length > 0) {
+        document.querySelectorAll('#crons-tab').forEach(function(t){ t.style.display = ''; });
+      }
+    } catch(e) {}
+  })();
 
   startSystemHealthRefresh();
   startOverviewRefresh();
@@ -7981,14 +8358,7 @@ async function bootDashboard() {
 
   var sub = document.getElementById('boot-sub');
   if (sub) sub.textContent = 'Dashboard ready';
-  // Auto-show Crons tab if cron jobs exist
-  try {
-    var cronData = await fetch('/api/crons').then(function(r){return r.json();});
-    if (cronData.jobs && cronData.jobs.length > 0) {
-      document.querySelectorAll('#crons-tab').forEach(function(t){ t.style.display = ''; });
-    }
-  } catch(e) {}
-  setTimeout(finishBootOverlay, 180);
+  setTimeout(_safeFinishBoot, 180);
 }
 
 document.addEventListener('DOMContentLoaded', function() {
